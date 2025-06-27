@@ -15,7 +15,7 @@ This repository documents the various functions on fluidic channels that can be 
 
 6. Connectivity --> connectivity_actual: The number of instances where channels diverge or converge, should be a count integer number
 
-###Examples of fluidic channels are as shown below:
+### Examples of fluidic channels are as shown below:
 
 ![design_19](https://github.com/user-attachments/assets/65d78021-2765-4d0d-b704-392087fe7486)
 ![design_21](https://github.com/user-attachments/assets/21a4badd-3810-4d45-aeec-e4c89557465a)
