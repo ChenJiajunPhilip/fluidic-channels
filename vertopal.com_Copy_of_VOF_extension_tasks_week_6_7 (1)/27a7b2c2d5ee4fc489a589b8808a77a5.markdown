@@ -1,0 +1,4500 @@
+---
+jupyter:
+  colab:
+  kernelspec:
+    display_name: Python 3 (ipykernel)
+    language: python
+    name: python3
+  language_info:
+    codemirror_mode:
+      name: ipython
+      version: 3
+    file_extension: .py
+    mimetype: text/x-python
+    name: python
+    nbconvert_exporter: python
+    pygments_lexer: ipython3
+    version: 3.8.18
+  nbformat: 4
+  nbformat_minor: 5
+---
+
+::: {#3e236c62 .cell .markdown id="3e236c62"}
+Please see below for the 6 geometric functions:
+
+1.  Volume of fluid (VOF) \--\> find_vof: Ratio of fluid region to
+    overall rectangular design space, will range between 0 to 1
+
+2.  Number of outlets \--\> num_outlets: Number of outlet channels
+
+3.  Average outlet channel thickness \--\> outlet_thicknesses: The
+    average ratio thickness of the outlet channel, with respect to
+    overall height of design space, will range between 0 to 1
+
+4.  Average inlet channel thickness \--\> inlet_thicknesses: The average
+    ratio thickness of the inlet channel, with respect to overall height
+    of design space, will range between 0 to 1
+
+5.  Periemter \--\> perimeter: The number of pixels that surround the
+    black fluid region, note that this function depends on
+    subtract_inlet() and subtract_outlet() functions
+
+6.  Connectivity \--\> connectivity: The number of instances where
+    channels diverge or converge, should be a count integer number
+:::
+
+::: {#a1ac7c61 .cell .code id="a1ac7c61"}
+``` python
+from PIL import Image
+import numpy as np
+import cv2
+import matplotlib.pyplot as plt
+import openai
+from openai import OpenAI
+import os
+import io
+import re
+
+
+# === SETUP ===
+openai.api_key = "REDACTED"
+client = OpenAI(api_key=openai.api_key)
+```
+:::
+
+::: {#e4630459 .cell .code id="e4630459"}
+``` python
+def find_vof_actual(image_path):
+  image = Image.open(image_path)
+  grayscale_image = image.convert('L')
+  array = np.array(grayscale_image) < 128
+  vof = np.sum(array) / array.size
+  return vof
+
+def num_outlets_actual(image_path):
+    image = Image.open(image_path)
+    grayscale_image = image.convert('L')
+    array = np.array(grayscale_image) > 128 # Pixels are either 1 (white), or 0 (black)
+
+    switch_count = int(np.round(np.sum(array[:-1, -1] != array[1:, -1]) / 2))
+
+    return switch_count
+
+def outlet_thicknesses_actual(image_path):
+  image = Image.open(image_path)
+  grayscale_image = image.convert('L')
+  array = np.array(grayscale_image) > 128 # Pixels are either 1 (white), or 0 (black)
+
+  last_col = array[:, -1]
+  thicknesses = []
+  current_run = 0
+
+  # Iterate through the last column
+  for val in last_col:
+    if val == 0:
+      current_run += 1
+    else:
+      if current_run > 0:
+        thicknesses.append(current_run/256) # Divide by the number of pixels in a column
+      current_run = 0  # Reset
+
+  if current_run > 0:
+    thicknesses.append(current_run)
+
+  if len(thicknesses) > 0:
+    return sum(thicknesses) / len(thicknesses) # Average channel thickness
+    #return sum(thicknesses) # Sum of thicknesses
+
+  else:
+    return 0
+
+
+def inlet_thicknesses_actual(image_path):
+  image = Image.open(image_path)
+  grayscale_image = image.convert('L')
+  array = np.array(grayscale_image) > 128 # Pixels are either 1 (white), or 0 (black)
+
+  first_col = array[:, 0]
+  thicknesses = []
+  current_run = 0
+
+  # Iterate through the first column
+  for val in first_col:
+    if val == 0:
+      current_run += 1
+    else:
+      if current_run > 0:
+        thicknesses.append(current_run/256) # Divide by the number of pixels in a column
+      current_run = 0  # Reset
+
+
+  if current_run > 0:
+    thicknesses.append(current_run)
+
+  if len(thicknesses) > 0:
+    return sum(thicknesses) / len(thicknesses) # Average channel thickness
+    #return sum(thicknesses) # Sum of thicknesses
+
+  else:
+    return 0
+
+
+
+
+
+def subtract_inlet_actual(array):
+  first_col = array[:, 0]
+  thicknesses = []
+  current_run = 0
+
+  # Iterate through the first column
+  for val in first_col:
+    if val == 0:
+      current_run += 1
+    else:
+      if current_run > 0:
+        thicknesses.append(current_run) # Divide by the number of pixels in a column
+      current_run = 0  # Reset
+
+
+  if current_run > 0:
+    thicknesses.append(current_run)
+
+  return sum(thicknesses)
+
+
+def subtract_outlet_actual(array):
+  last_col = array[:, -1]
+  thicknesses = []
+  current_run = 0
+
+  # Iterate through the last column
+  for val in last_col:
+    if val == 0:
+      current_run += 1
+    else:
+      if current_run > 0:
+        thicknesses.append(current_run) # Divide by the number of pixels in a column
+      current_run = 0  # Reset
+
+  if current_run > 0:
+    thicknesses.append(current_run)
+
+  return sum(thicknesses)
+
+def perimeter_actual(image_path):
+    image = Image.open(image_path)
+    grayscale_image = image.convert('L')
+    array = np.array(grayscale_image) > 128 # Pixels are either 1 (white), or 0 (black)
+
+    array = array.squeeze()
+    #Obtain inlet and outlet thicknesses
+    inlet = subtract_inlet(array)
+    outlet = subtract_outlet(array)
+
+    array = np.pad(array, pad_width=1, mode='constant', constant_values=0)
+
+    # Convert the NumPy array to an OpenCV image
+    img = cv2.cvtColor(array.astype(np.uint8), cv2.COLOR_GRAY2BGR)
+
+    # Convert to grayscale and 8-bit unsigned integer
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    gray = cv2.convertScaleAbs(gray)
+
+    # Find contours
+    contours, _ = cv2.findContours(gray, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    #print(f'{len(contours)} contours identified.')
+
+    if contours:
+        # Remove corner points
+        height, width = array.shape
+        corner_points = np.array([[0, 0], [width - 1, 0], [width - 1, height - 1], [0, height - 1]])
+        corner_points_list = corner_points.tolist()
+
+        filtered_contours = []
+
+        for i, cnt in enumerate(contours):
+            cnt_array = cnt.reshape(-1, 2)
+            filtered_cnt = cnt_array[~np.any(np.isin(cnt_array, corner_points_list), axis=1)]
+            filtered_contours.append(filtered_cnt)
+
+
+            # Extract contour points
+            x_coords, y_coords = filtered_cnt[:, 0], filtered_cnt[:, 1]
+
+            # Plot the contour with a different color
+            #plt.plot(x_coords, y_coords, color=colors[i % len(colors)], linewidth=2)
+            #plt.scatter(x_coords, y_coords, color='red', s=3)
+
+
+
+        # Calculate total perimeter
+        total_perimeter = sum(cv2.arcLength(cnt, True) for cnt in filtered_contours)
+        actual_perimeter = total_perimeter - 2*514 - (2 * 258 - inlet - outlet)
+
+        # Plot the array (optional)
+        #plt.imshow(array, cmap='gray', alpha=0.3)  # Add transparency to the image
+
+        # Title and show the plot
+        #plt.title(f"Perimeter: {actual_perimeter}")
+
+        plt.show()
+        return actual_perimeter
+    else:
+        return 0
+
+
+def connectivity_actual(image_path):
+  image = Image.open(image_path)
+  grayscale_image = image.convert('L')
+  array = np.array(grayscale_image) > 128 # Pixels are either 1 (white), or 0 (black)
+
+  # Initialize a counter for changes
+  change_count = 0
+
+  # Iterate through each column
+  for col_index in range(array.shape[1]-1):
+    previous_column = int(np.round(np.sum(array[:-1, col_index] != array[1:, col_index]) / 2))
+    current_column = int(np.round(np.sum(array[:-1, col_index+1] != array[1:, col_index+1]) / 2))
+    if previous_column != current_column:
+      change_count += 1
+
+  return change_count
+
+```
+:::
+
+::: {#pkhBDQSwtjWT .cell .markdown id="pkhBDQSwtjWT"}
+##test num_outlets
+:::
+
+::: {#aHROQNjhin1J .cell .code colab="{\"base_uri\":\"https://localhost:8080/\",\"height\":1000}" id="aHROQNjhin1J" outputId="e8523288-65c6-4e94-f20a-a7c056632280"}
+``` python
+import openai
+from openai import OpenAI
+import numpy as np
+import matplotlib.pyplot as plt
+from PIL import Image
+import os
+import io
+import re
+
+
+# === SETUP ===
+openai.api_key = "REDACTED"
+client = OpenAI(api_key=openai.api_key)
+
+base_prompt = """Write a Python function named `num_outlets()` that counts the number of outlet channels in a numpy array representing a binary or grayscale image.
+Inlet channels are always located on the **left** edge of the image, and outlet channels are located on the **right** edge of the image.
+Return the number of **outlet** channels as an integer. Do not count inlets. The input is a numpy array."""
+
+
+# === Extract Python code from GPT output ===
+def extract_python_code(response_text):
+    matches = re.findall(r"```(?:python)?(.*?)```", response_text, re.DOTALL)
+    return matches[0].strip() if matches else response_text.strip()
+
+# === Prompt GPT to generate num_outlets() ===
+def get_outlet_function_from_gpt(prompt):
+    response = client.chat.completions.create(
+        model="gpt-4o",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0
+    )
+    return response.choices[0].message.content
+
+# === Upload image ===
+def upload_image():
+    uploaded = files.upload()
+    for filename in uploaded.keys():
+        return filename
+
+# === Run generated function on image ===
+def run_generated_outlet_function(code_str, image_array):
+    code_str = extract_python_code(code_str)
+    local_vars = {}
+    exec(code_str, globals(), local_vars)
+    num_outlets_func = local_vars.get("num_outlets")
+    if num_outlets_func is None:
+        raise ValueError("Function `num_outlets()` not found.")
+    return num_outlets_func(image_array)
+
+# === MAIN LOOP ===
+attempts = 0
+mae_list = []
+all_errors = []
+
+while attempts < 10:
+    print(f"\n📤 Upload a PNG image for attempt {attempts + 1}")
+    image_path = upload_image()
+
+    image = Image.open(image_path).convert('L')
+    image_array = np.array(image)
+
+    actual_count = num_outlets_actual(image_path)
+
+    if attempts == 0:
+        prompt = base_prompt
+    else:
+        feedback = f"\n\nFeedback: Your previous estimate had MAE = {mae_list[-1]:.4f}. Please improve the accuracy of your num_outlets() function."
+        prompt = base_prompt + feedback
+
+    print("🔁 Calling ChatGPT for num_outlets() function...")
+    code = get_outlet_function_from_gpt(prompt)
+    print("🧠 Function received from GPT:\n", code)
+
+    try:
+        pred_count = run_generated_outlet_function(code, image_array)
+    except Exception as e:
+        print("❌ Error running the generated function:", e)
+        mae_list.append(10)  # Penalize failure
+        attempts += 1
+        continue
+
+    error = abs(pred_count - actual_count)
+    all_errors.append(error)
+    mae = error if attempts == 0 else np.mean(all_errors)
+    mae_list.append(mae)
+
+    print(f"\n✅ Attempt {attempts + 1}:")
+    print(f"Predicted Outlet Count: {pred_count}")
+    print(f"Actual Outlet Count:    {actual_count}")
+    print(f"Absolute Error:         {error}")
+    print(f"MAE:                    {mae:.4f}")
+
+    if mae < 0.1:
+        print("\n🎯 Success: MAE is acceptable. Returning the final num_outlets() function:\n")
+        print(extract_python_code(code))
+        break
+    else:
+        print("\n⚠️ Not accurate enough. Please upload another image to help improve the model.\n")
+
+    attempts += 1
+
+# === PLOT MAE ===
+plt.plot(range(1, len(mae_list)+1), mae_list, marker='o')
+plt.title("Mean Absolute Error (MAE) for num_outlets() over Attempts")
+plt.xlabel("Attempt")
+plt.ylabel("MAE")
+plt.grid(True)
+plt.show()
+```
+
+::: {.output .stream .stdout}
+
+    📤 Upload a PNG image for attempt 1
+:::
+
+::: {.output .display_data}
+```{=html}
+
+     <input type="file" id="files-87be8b84-e6d7-46a4-82fa-306f445f7f83" name="files[]" multiple disabled
+        style="border:none" />
+     <output id="result-87be8b84-e6d7-46a4-82fa-306f445f7f83">
+      Upload widget is only available when the cell has been executed in the
+      current browser session. Please rerun this cell to enable.
+      </output>
+      <script>// Copyright 2017 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+/**
+ * @fileoverview Helpers for google.colab Python module.
+ */
+(function(scope) {
+function span(text, styleAttributes = {}) {
+  const element = document.createElement('span');
+  element.textContent = text;
+  for (const key of Object.keys(styleAttributes)) {
+    element.style[key] = styleAttributes[key];
+  }
+  return element;
+}
+
+// Max number of bytes which will be uploaded at a time.
+const MAX_PAYLOAD_SIZE = 100 * 1024;
+
+function _uploadFiles(inputId, outputId) {
+  const steps = uploadFilesStep(inputId, outputId);
+  const outputElement = document.getElementById(outputId);
+  // Cache steps on the outputElement to make it available for the next call
+  // to uploadFilesContinue from Python.
+  outputElement.steps = steps;
+
+  return _uploadFilesContinue(outputId);
+}
+
+// This is roughly an async generator (not supported in the browser yet),
+// where there are multiple asynchronous steps and the Python side is going
+// to poll for completion of each step.
+// This uses a Promise to block the python side on completion of each step,
+// then passes the result of the previous step as the input to the next step.
+function _uploadFilesContinue(outputId) {
+  const outputElement = document.getElementById(outputId);
+  const steps = outputElement.steps;
+
+  const next = steps.next(outputElement.lastPromiseValue);
+  return Promise.resolve(next.value.promise).then((value) => {
+    // Cache the last promise value to make it available to the next
+    // step of the generator.
+    outputElement.lastPromiseValue = value;
+    return next.value.response;
+  });
+}
+
+/**
+ * Generator function which is called between each async step of the upload
+ * process.
+ * @param {string} inputId Element ID of the input file picker element.
+ * @param {string} outputId Element ID of the output display.
+ * @return {!Iterable<!Object>} Iterable of next steps.
+ */
+function* uploadFilesStep(inputId, outputId) {
+  const inputElement = document.getElementById(inputId);
+  inputElement.disabled = false;
+
+  const outputElement = document.getElementById(outputId);
+  outputElement.innerHTML = '';
+
+  const pickedPromise = new Promise((resolve) => {
+    inputElement.addEventListener('change', (e) => {
+      resolve(e.target.files);
+    });
+  });
+
+  const cancel = document.createElement('button');
+  inputElement.parentElement.appendChild(cancel);
+  cancel.textContent = 'Cancel upload';
+  const cancelPromise = new Promise((resolve) => {
+    cancel.onclick = () => {
+      resolve(null);
+    };
+  });
+
+  // Wait for the user to pick the files.
+  const files = yield {
+    promise: Promise.race([pickedPromise, cancelPromise]),
+    response: {
+      action: 'starting',
+    }
+  };
+
+  cancel.remove();
+
+  // Disable the input element since further picks are not allowed.
+  inputElement.disabled = true;
+
+  if (!files) {
+    return {
+      response: {
+        action: 'complete',
+      }
+    };
+  }
+
+  for (const file of files) {
+    const li = document.createElement('li');
+    li.append(span(file.name, {fontWeight: 'bold'}));
+    li.append(span(
+        `(${file.type || 'n/a'}) - ${file.size} bytes, ` +
+        `last modified: ${
+            file.lastModifiedDate ? file.lastModifiedDate.toLocaleDateString() :
+                                    'n/a'} - `));
+    const percent = span('0% done');
+    li.appendChild(percent);
+
+    outputElement.appendChild(li);
+
+    const fileDataPromise = new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        resolve(e.target.result);
+      };
+      reader.readAsArrayBuffer(file);
+    });
+    // Wait for the data to be ready.
+    let fileData = yield {
+      promise: fileDataPromise,
+      response: {
+        action: 'continue',
+      }
+    };
+
+    // Use a chunked sending to avoid message size limits. See b/62115660.
+    let position = 0;
+    do {
+      const length = Math.min(fileData.byteLength - position, MAX_PAYLOAD_SIZE);
+      const chunk = new Uint8Array(fileData, position, length);
+      position += length;
+
+      const base64 = btoa(String.fromCharCode.apply(null, chunk));
+      yield {
+        response: {
+          action: 'append',
+          file: file.name,
+          data: base64,
+        },
+      };
+
+      let percentDone = fileData.byteLength === 0 ?
+          100 :
+          Math.round((position / fileData.byteLength) * 100);
+      percent.textContent = `${percentDone}% done`;
+
+    } while (position < fileData.byteLength);
+  }
+
+  // All done.
+  yield {
+    response: {
+      action: 'complete',
+    }
+  };
+}
+
+scope.google = scope.google || {};
+scope.google.colab = scope.google.colab || {};
+scope.google.colab._files = {
+  _uploadFiles,
+  _uploadFilesContinue,
+};
+})(self);
+</script> 
+```
+:::
+
+::: {.output .stream .stdout}
+    Saving design_80.png to design_80 (2).png
+    🔁 Calling ChatGPT for num_outlets() function...
+    🧠 Function received from GPT:
+     To solve this problem, we need to analyze the right edge of the given numpy array, which represents an image. The task is to count the number of distinct outlet channels on this edge. An outlet channel can be defined as a contiguous sequence of non-zero pixels (for binary images) or pixels above a certain threshold (for grayscale images) on the right edge of the image.
+
+    Here's a step-by-step approach to implement the `num_outlets()` function:
+
+    1. **Extract the Right Edge**: Get the last column of the numpy array, which represents the right edge of the image.
+
+    2. **Identify Outlets**: Traverse through this column to identify contiguous sequences of non-zero pixels. Each contiguous sequence represents an outlet channel.
+
+    3. **Count the Outlets**: Keep a count of these sequences.
+
+    Here's the implementation of the `num_outlets()` function:
+
+    ```python
+    import numpy as np
+
+    def num_outlets(image):
+        # Get the number of rows in the image
+        num_rows = image.shape[0]
+        
+        # Extract the right edge of the image
+        right_edge = image[:, -1]
+        
+        # Initialize the outlet count
+        outlet_count = 0
+        
+        # Flag to track if we are in an outlet
+        in_outlet = False
+        
+        # Traverse the right edge to count outlets
+        for i in range(num_rows):
+            if right_edge[i] > 0:  # Non-zero pixel indicates part of an outlet
+                if not in_outlet:
+                    # We have found the start of a new outlet
+                    outlet_count += 1
+                    in_outlet = True
+            else:
+                # Zero pixel indicates no outlet
+                in_outlet = False
+        
+        return outlet_count
+
+    # Example usage:
+    # image = np.array([[0, 0, 0, 1],
+    #                   [0, 0, 0, 1],
+    #                   [0, 0, 0, 0],
+    #                   [0, 0, 0, 1]])
+    # print(num_outlets(image))  # Output: 2
+    ```
+
+    ### Explanation:
+    - **right_edge**: This extracts the last column of the image, which is the right edge.
+    - **outlet_count**: This variable keeps track of the number of outlet channels found.
+    - **in_outlet**: A boolean flag to determine if we are currently within an outlet channel.
+    - The loop iterates over each pixel in the right edge. If a non-zero pixel is found and we are not already in an outlet, it indicates the start of a new outlet, and we increment the count. If a zero pixel is encountered, we reset the `in_outlet` flag.
+
+    This function will correctly count the number of outlet channels on the right edge of a binary or grayscale image represented as a numpy array.
+
+    ✅ Attempt 1:
+    Predicted Outlet Count: 3
+    Actual Outlet Count:    2
+    Absolute Error:         1
+    MAE:                    1.0000
+
+    ⚠️ Not accurate enough. Please upload another image to help improve the model.
+
+
+    📤 Upload a PNG image for attempt 2
+:::
+
+::: {.output .display_data}
+```{=html}
+
+     <input type="file" id="files-3c0cd1f0-e3ba-4147-b208-df2135319659" name="files[]" multiple disabled
+        style="border:none" />
+     <output id="result-3c0cd1f0-e3ba-4147-b208-df2135319659">
+      Upload widget is only available when the cell has been executed in the
+      current browser session. Please rerun this cell to enable.
+      </output>
+      <script>// Copyright 2017 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+/**
+ * @fileoverview Helpers for google.colab Python module.
+ */
+(function(scope) {
+function span(text, styleAttributes = {}) {
+  const element = document.createElement('span');
+  element.textContent = text;
+  for (const key of Object.keys(styleAttributes)) {
+    element.style[key] = styleAttributes[key];
+  }
+  return element;
+}
+
+// Max number of bytes which will be uploaded at a time.
+const MAX_PAYLOAD_SIZE = 100 * 1024;
+
+function _uploadFiles(inputId, outputId) {
+  const steps = uploadFilesStep(inputId, outputId);
+  const outputElement = document.getElementById(outputId);
+  // Cache steps on the outputElement to make it available for the next call
+  // to uploadFilesContinue from Python.
+  outputElement.steps = steps;
+
+  return _uploadFilesContinue(outputId);
+}
+
+// This is roughly an async generator (not supported in the browser yet),
+// where there are multiple asynchronous steps and the Python side is going
+// to poll for completion of each step.
+// This uses a Promise to block the python side on completion of each step,
+// then passes the result of the previous step as the input to the next step.
+function _uploadFilesContinue(outputId) {
+  const outputElement = document.getElementById(outputId);
+  const steps = outputElement.steps;
+
+  const next = steps.next(outputElement.lastPromiseValue);
+  return Promise.resolve(next.value.promise).then((value) => {
+    // Cache the last promise value to make it available to the next
+    // step of the generator.
+    outputElement.lastPromiseValue = value;
+    return next.value.response;
+  });
+}
+
+/**
+ * Generator function which is called between each async step of the upload
+ * process.
+ * @param {string} inputId Element ID of the input file picker element.
+ * @param {string} outputId Element ID of the output display.
+ * @return {!Iterable<!Object>} Iterable of next steps.
+ */
+function* uploadFilesStep(inputId, outputId) {
+  const inputElement = document.getElementById(inputId);
+  inputElement.disabled = false;
+
+  const outputElement = document.getElementById(outputId);
+  outputElement.innerHTML = '';
+
+  const pickedPromise = new Promise((resolve) => {
+    inputElement.addEventListener('change', (e) => {
+      resolve(e.target.files);
+    });
+  });
+
+  const cancel = document.createElement('button');
+  inputElement.parentElement.appendChild(cancel);
+  cancel.textContent = 'Cancel upload';
+  const cancelPromise = new Promise((resolve) => {
+    cancel.onclick = () => {
+      resolve(null);
+    };
+  });
+
+  // Wait for the user to pick the files.
+  const files = yield {
+    promise: Promise.race([pickedPromise, cancelPromise]),
+    response: {
+      action: 'starting',
+    }
+  };
+
+  cancel.remove();
+
+  // Disable the input element since further picks are not allowed.
+  inputElement.disabled = true;
+
+  if (!files) {
+    return {
+      response: {
+        action: 'complete',
+      }
+    };
+  }
+
+  for (const file of files) {
+    const li = document.createElement('li');
+    li.append(span(file.name, {fontWeight: 'bold'}));
+    li.append(span(
+        `(${file.type || 'n/a'}) - ${file.size} bytes, ` +
+        `last modified: ${
+            file.lastModifiedDate ? file.lastModifiedDate.toLocaleDateString() :
+                                    'n/a'} - `));
+    const percent = span('0% done');
+    li.appendChild(percent);
+
+    outputElement.appendChild(li);
+
+    const fileDataPromise = new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        resolve(e.target.result);
+      };
+      reader.readAsArrayBuffer(file);
+    });
+    // Wait for the data to be ready.
+    let fileData = yield {
+      promise: fileDataPromise,
+      response: {
+        action: 'continue',
+      }
+    };
+
+    // Use a chunked sending to avoid message size limits. See b/62115660.
+    let position = 0;
+    do {
+      const length = Math.min(fileData.byteLength - position, MAX_PAYLOAD_SIZE);
+      const chunk = new Uint8Array(fileData, position, length);
+      position += length;
+
+      const base64 = btoa(String.fromCharCode.apply(null, chunk));
+      yield {
+        response: {
+          action: 'append',
+          file: file.name,
+          data: base64,
+        },
+      };
+
+      let percentDone = fileData.byteLength === 0 ?
+          100 :
+          Math.round((position / fileData.byteLength) * 100);
+      percent.textContent = `${percentDone}% done`;
+
+    } while (position < fileData.byteLength);
+  }
+
+  // All done.
+  yield {
+    response: {
+      action: 'complete',
+    }
+  };
+}
+
+scope.google = scope.google || {};
+scope.google.colab = scope.google.colab || {};
+scope.google.colab._files = {
+  _uploadFiles,
+  _uploadFilesContinue,
+};
+})(self);
+</script> 
+```
+:::
+
+::: {.output .stream .stdout}
+    Saving design_24.png to design_24.png
+    🔁 Calling ChatGPT for num_outlets() function...
+    🧠 Function received from GPT:
+     To improve the accuracy of the `num_outlets()` function, we need to ensure that we correctly identify and count the outlet channels on the right edge of the image. Here's a refined version of the function:
+
+    ```python
+    import numpy as np
+
+    def num_outlets(image):
+        """
+        Counts the number of outlet channels on the right edge of a binary or grayscale image.
+
+        Parameters:
+        image (numpy.ndarray): A 2D numpy array representing a binary or grayscale image.
+
+        Returns:
+        int: The number of outlet channels on the right edge of the image.
+        """
+        # Ensure the input is a 2D numpy array
+        if not isinstance(image, np.ndarray) or image.ndim != 2:
+            raise ValueError("Input must be a 2D numpy array.")
+
+        # Get the right edge of the image
+        right_edge = image[:, -1]
+
+        # Identify unique segments on the right edge
+        # We assume that a channel is represented by a contiguous segment of non-zero values
+        # We will count transitions from 0 to non-zero as the start of a new channel
+        outlet_count = 0
+        in_channel = False
+
+        for pixel in right_edge:
+            if pixel != 0 and not in_channel:
+                # Start of a new outlet channel
+                outlet_count += 1
+                in_channel = True
+            elif pixel == 0:
+                # End of a channel
+                in_channel = False
+
+        return outlet_count
+
+    # Example usage:
+    # image = np.array([[0, 0, 0, 1],
+    #                   [0, 0, 0, 1],
+    #                   [0, 0, 0, 0],
+    #                   [0, 0, 0, 1]])
+    # print(num_outlets(image))  # Output: 2
+    ```
+
+    ### Explanation:
+    - **Input Validation**: The function first checks if the input is a 2D numpy array.
+    - **Right Edge Extraction**: It extracts the rightmost column of the image, which represents the right edge.
+    - **Channel Counting**: It iterates over the pixels in the right edge, counting transitions from 0 to non-zero values as the start of a new outlet channel. This approach ensures that each contiguous segment of non-zero values is counted as a single outlet channel.
+    - **Return**: The function returns the total count of outlet channels.
+
+    This implementation should provide a more accurate count of outlet channels by correctly identifying contiguous segments of non-zero values on the right edge of the image.
+
+    ✅ Attempt 2:
+    Predicted Outlet Count: 3
+    Actual Outlet Count:    2
+    Absolute Error:         1
+    MAE:                    1.0000
+
+    ⚠️ Not accurate enough. Please upload another image to help improve the model.
+
+
+    📤 Upload a PNG image for attempt 3
+:::
+
+::: {.output .display_data}
+```{=html}
+
+     <input type="file" id="files-733b1132-06c0-4af6-abd5-5c9ef84158c0" name="files[]" multiple disabled
+        style="border:none" />
+     <output id="result-733b1132-06c0-4af6-abd5-5c9ef84158c0">
+      Upload widget is only available when the cell has been executed in the
+      current browser session. Please rerun this cell to enable.
+      </output>
+      <script>// Copyright 2017 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+/**
+ * @fileoverview Helpers for google.colab Python module.
+ */
+(function(scope) {
+function span(text, styleAttributes = {}) {
+  const element = document.createElement('span');
+  element.textContent = text;
+  for (const key of Object.keys(styleAttributes)) {
+    element.style[key] = styleAttributes[key];
+  }
+  return element;
+}
+
+// Max number of bytes which will be uploaded at a time.
+const MAX_PAYLOAD_SIZE = 100 * 1024;
+
+function _uploadFiles(inputId, outputId) {
+  const steps = uploadFilesStep(inputId, outputId);
+  const outputElement = document.getElementById(outputId);
+  // Cache steps on the outputElement to make it available for the next call
+  // to uploadFilesContinue from Python.
+  outputElement.steps = steps;
+
+  return _uploadFilesContinue(outputId);
+}
+
+// This is roughly an async generator (not supported in the browser yet),
+// where there are multiple asynchronous steps and the Python side is going
+// to poll for completion of each step.
+// This uses a Promise to block the python side on completion of each step,
+// then passes the result of the previous step as the input to the next step.
+function _uploadFilesContinue(outputId) {
+  const outputElement = document.getElementById(outputId);
+  const steps = outputElement.steps;
+
+  const next = steps.next(outputElement.lastPromiseValue);
+  return Promise.resolve(next.value.promise).then((value) => {
+    // Cache the last promise value to make it available to the next
+    // step of the generator.
+    outputElement.lastPromiseValue = value;
+    return next.value.response;
+  });
+}
+
+/**
+ * Generator function which is called between each async step of the upload
+ * process.
+ * @param {string} inputId Element ID of the input file picker element.
+ * @param {string} outputId Element ID of the output display.
+ * @return {!Iterable<!Object>} Iterable of next steps.
+ */
+function* uploadFilesStep(inputId, outputId) {
+  const inputElement = document.getElementById(inputId);
+  inputElement.disabled = false;
+
+  const outputElement = document.getElementById(outputId);
+  outputElement.innerHTML = '';
+
+  const pickedPromise = new Promise((resolve) => {
+    inputElement.addEventListener('change', (e) => {
+      resolve(e.target.files);
+    });
+  });
+
+  const cancel = document.createElement('button');
+  inputElement.parentElement.appendChild(cancel);
+  cancel.textContent = 'Cancel upload';
+  const cancelPromise = new Promise((resolve) => {
+    cancel.onclick = () => {
+      resolve(null);
+    };
+  });
+
+  // Wait for the user to pick the files.
+  const files = yield {
+    promise: Promise.race([pickedPromise, cancelPromise]),
+    response: {
+      action: 'starting',
+    }
+  };
+
+  cancel.remove();
+
+  // Disable the input element since further picks are not allowed.
+  inputElement.disabled = true;
+
+  if (!files) {
+    return {
+      response: {
+        action: 'complete',
+      }
+    };
+  }
+
+  for (const file of files) {
+    const li = document.createElement('li');
+    li.append(span(file.name, {fontWeight: 'bold'}));
+    li.append(span(
+        `(${file.type || 'n/a'}) - ${file.size} bytes, ` +
+        `last modified: ${
+            file.lastModifiedDate ? file.lastModifiedDate.toLocaleDateString() :
+                                    'n/a'} - `));
+    const percent = span('0% done');
+    li.appendChild(percent);
+
+    outputElement.appendChild(li);
+
+    const fileDataPromise = new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        resolve(e.target.result);
+      };
+      reader.readAsArrayBuffer(file);
+    });
+    // Wait for the data to be ready.
+    let fileData = yield {
+      promise: fileDataPromise,
+      response: {
+        action: 'continue',
+      }
+    };
+
+    // Use a chunked sending to avoid message size limits. See b/62115660.
+    let position = 0;
+    do {
+      const length = Math.min(fileData.byteLength - position, MAX_PAYLOAD_SIZE);
+      const chunk = new Uint8Array(fileData, position, length);
+      position += length;
+
+      const base64 = btoa(String.fromCharCode.apply(null, chunk));
+      yield {
+        response: {
+          action: 'append',
+          file: file.name,
+          data: base64,
+        },
+      };
+
+      let percentDone = fileData.byteLength === 0 ?
+          100 :
+          Math.round((position / fileData.byteLength) * 100);
+      percent.textContent = `${percentDone}% done`;
+
+    } while (position < fileData.byteLength);
+  }
+
+  // All done.
+  yield {
+    response: {
+      action: 'complete',
+    }
+  };
+}
+
+scope.google = scope.google || {};
+scope.google.colab = scope.google.colab || {};
+scope.google.colab._files = {
+  _uploadFiles,
+  _uploadFilesContinue,
+};
+})(self);
+</script> 
+```
+:::
+
+::: {.output .stream .stdout}
+    Saving design_19.png to design_19.png
+    🔁 Calling ChatGPT for num_outlets() function...
+    🧠 Function received from GPT:
+     To improve the accuracy of the `num_outlets()` function, we need to ensure that we correctly identify and count the outlet channels on the right edge of the image. Here's a refined approach to achieve this:
+
+    1. **Identify Outlets**: We will scan the rightmost column of the image to identify continuous segments of non-zero values, which represent outlet channels.
+
+    2. **Count Outlets**: We will count these continuous segments to determine the number of outlet channels.
+
+    Here's the implementation of the `num_outlets()` function:
+
+    ```python
+    import numpy as np
+
+    def num_outlets(image):
+        # Ensure the input is a numpy array
+        if not isinstance(image, np.ndarray):
+            raise ValueError("Input must be a numpy array.")
+        
+        # Get the rightmost column of the image
+        right_edge = image[:, -1]
+        
+        # Initialize variables to count outlets
+        outlet_count = 0
+        in_outlet = False
+        
+        # Iterate over the right edge to count continuous non-zero segments
+        for pixel in right_edge:
+            if pixel > 0:  # Assuming non-zero values indicate a channel
+                if not in_outlet:
+                    # Start of a new outlet
+                    outlet_count += 1
+                    in_outlet = True
+            else:
+                # End of a current outlet
+                in_outlet = False
+        
+        return outlet_count
+
+    # Example usage:
+    # image = np.array([[0, 0, 0, 1],
+    #                   [0, 0, 0, 1],
+    #                   [0, 0, 0, 0],
+    #                   [0, 0, 0, 1]])
+    # print(num_outlets(image))  # Output should be 2
+    ```
+
+    ### Explanation:
+    - **Right Edge Extraction**: We extract the rightmost column of the image using `image[:, -1]`.
+    - **Outlet Detection**: We iterate through this column, checking for transitions from zero to non-zero values to detect the start of an outlet.
+    - **Counting**: We increment the outlet count each time we detect the start of a new outlet and ensure we don't double-count by using a flag (`in_outlet`) to track whether we are currently within an outlet.
+
+    This approach should accurately count the number of outlet channels on the right edge of the image.
+
+    ✅ Attempt 3:
+    Predicted Outlet Count: 4
+    Actual Outlet Count:    3
+    Absolute Error:         1
+    MAE:                    1.0000
+
+    ⚠️ Not accurate enough. Please upload another image to help improve the model.
+
+
+    📤 Upload a PNG image for attempt 4
+:::
+
+::: {.output .display_data}
+```{=html}
+
+     <input type="file" id="files-2846d552-d1a4-40b6-8cb6-c3e0e9bdba3f" name="files[]" multiple disabled
+        style="border:none" />
+     <output id="result-2846d552-d1a4-40b6-8cb6-c3e0e9bdba3f">
+      Upload widget is only available when the cell has been executed in the
+      current browser session. Please rerun this cell to enable.
+      </output>
+      <script>// Copyright 2017 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+/**
+ * @fileoverview Helpers for google.colab Python module.
+ */
+(function(scope) {
+function span(text, styleAttributes = {}) {
+  const element = document.createElement('span');
+  element.textContent = text;
+  for (const key of Object.keys(styleAttributes)) {
+    element.style[key] = styleAttributes[key];
+  }
+  return element;
+}
+
+// Max number of bytes which will be uploaded at a time.
+const MAX_PAYLOAD_SIZE = 100 * 1024;
+
+function _uploadFiles(inputId, outputId) {
+  const steps = uploadFilesStep(inputId, outputId);
+  const outputElement = document.getElementById(outputId);
+  // Cache steps on the outputElement to make it available for the next call
+  // to uploadFilesContinue from Python.
+  outputElement.steps = steps;
+
+  return _uploadFilesContinue(outputId);
+}
+
+// This is roughly an async generator (not supported in the browser yet),
+// where there are multiple asynchronous steps and the Python side is going
+// to poll for completion of each step.
+// This uses a Promise to block the python side on completion of each step,
+// then passes the result of the previous step as the input to the next step.
+function _uploadFilesContinue(outputId) {
+  const outputElement = document.getElementById(outputId);
+  const steps = outputElement.steps;
+
+  const next = steps.next(outputElement.lastPromiseValue);
+  return Promise.resolve(next.value.promise).then((value) => {
+    // Cache the last promise value to make it available to the next
+    // step of the generator.
+    outputElement.lastPromiseValue = value;
+    return next.value.response;
+  });
+}
+
+/**
+ * Generator function which is called between each async step of the upload
+ * process.
+ * @param {string} inputId Element ID of the input file picker element.
+ * @param {string} outputId Element ID of the output display.
+ * @return {!Iterable<!Object>} Iterable of next steps.
+ */
+function* uploadFilesStep(inputId, outputId) {
+  const inputElement = document.getElementById(inputId);
+  inputElement.disabled = false;
+
+  const outputElement = document.getElementById(outputId);
+  outputElement.innerHTML = '';
+
+  const pickedPromise = new Promise((resolve) => {
+    inputElement.addEventListener('change', (e) => {
+      resolve(e.target.files);
+    });
+  });
+
+  const cancel = document.createElement('button');
+  inputElement.parentElement.appendChild(cancel);
+  cancel.textContent = 'Cancel upload';
+  const cancelPromise = new Promise((resolve) => {
+    cancel.onclick = () => {
+      resolve(null);
+    };
+  });
+
+  // Wait for the user to pick the files.
+  const files = yield {
+    promise: Promise.race([pickedPromise, cancelPromise]),
+    response: {
+      action: 'starting',
+    }
+  };
+
+  cancel.remove();
+
+  // Disable the input element since further picks are not allowed.
+  inputElement.disabled = true;
+
+  if (!files) {
+    return {
+      response: {
+        action: 'complete',
+      }
+    };
+  }
+
+  for (const file of files) {
+    const li = document.createElement('li');
+    li.append(span(file.name, {fontWeight: 'bold'}));
+    li.append(span(
+        `(${file.type || 'n/a'}) - ${file.size} bytes, ` +
+        `last modified: ${
+            file.lastModifiedDate ? file.lastModifiedDate.toLocaleDateString() :
+                                    'n/a'} - `));
+    const percent = span('0% done');
+    li.appendChild(percent);
+
+    outputElement.appendChild(li);
+
+    const fileDataPromise = new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        resolve(e.target.result);
+      };
+      reader.readAsArrayBuffer(file);
+    });
+    // Wait for the data to be ready.
+    let fileData = yield {
+      promise: fileDataPromise,
+      response: {
+        action: 'continue',
+      }
+    };
+
+    // Use a chunked sending to avoid message size limits. See b/62115660.
+    let position = 0;
+    do {
+      const length = Math.min(fileData.byteLength - position, MAX_PAYLOAD_SIZE);
+      const chunk = new Uint8Array(fileData, position, length);
+      position += length;
+
+      const base64 = btoa(String.fromCharCode.apply(null, chunk));
+      yield {
+        response: {
+          action: 'append',
+          file: file.name,
+          data: base64,
+        },
+      };
+
+      let percentDone = fileData.byteLength === 0 ?
+          100 :
+          Math.round((position / fileData.byteLength) * 100);
+      percent.textContent = `${percentDone}% done`;
+
+    } while (position < fileData.byteLength);
+  }
+
+  // All done.
+  yield {
+    response: {
+      action: 'complete',
+    }
+  };
+}
+
+scope.google = scope.google || {};
+scope.google.colab = scope.google.colab || {};
+scope.google.colab._files = {
+  _uploadFiles,
+  _uploadFilesContinue,
+};
+})(self);
+</script> 
+```
+:::
+
+::: {.output .stream .stdout}
+    Saving design_195.png to design_195.png
+    🔁 Calling ChatGPT for num_outlets() function...
+    🧠 Function received from GPT:
+     To improve the accuracy of the `num_outlets()` function, we need to ensure that we correctly identify and count the outlet channels on the right edge of the image. An outlet channel is defined as a continuous segment of non-zero pixels on the right edge of the image. Here's how you can implement this function:
+
+    ```python
+    import numpy as np
+
+    def num_outlets(image):
+        """
+        Counts the number of outlet channels on the right edge of a binary or grayscale image.
+
+        Parameters:
+        image (numpy.ndarray): A 2D numpy array representing a binary or grayscale image.
+
+        Returns:
+        int: The number of outlet channels on the right edge of the image.
+        """
+        # Get the right edge of the image
+        right_edge = image[:, -1]
+        
+        # Initialize the count of outlet channels
+        outlet_count = 0
+        
+        # Flag to track if we are in an outlet channel
+        in_outlet = False
+        
+        # Iterate over the right edge to count outlet channels
+        for pixel in right_edge:
+            if pixel > 0:  # Non-zero pixel indicates part of an outlet
+                if not in_outlet:
+                    # We have found the start of a new outlet channel
+                    outlet_count += 1
+                    in_outlet = True
+            else:
+                # Zero pixel indicates the end of an outlet channel
+                in_outlet = False
+        
+        return outlet_count
+
+    # Example usage:
+    # image = np.array([[0, 0, 0, 1],
+    #                   [0, 0, 0, 1],
+    #                   [0, 0, 0, 0],
+    #                   [0, 0, 0, 1]])
+    # print(num_outlets(image))  # Output: 2
+    ```
+
+    ### Explanation:
+    - **Right Edge Extraction**: We extract the rightmost column of the image using `image[:, -1]`.
+    - **Outlet Counting**: We iterate through the pixels of the right edge. We use a flag `in_outlet` to track whether we are currently within an outlet channel.
+      - If we encounter a non-zero pixel and `in_outlet` is `False`, it means we've found the start of a new outlet channel, so we increment the `outlet_count` and set `in_outlet` to `True`.
+      - If we encounter a zero pixel, we set `in_outlet` to `False`, indicating the end of an outlet channel.
+
+    This approach ensures that we accurately count each distinct outlet channel on the right edge of the image.
+
+    ✅ Attempt 4:
+    Predicted Outlet Count: 3
+    Actual Outlet Count:    2
+    Absolute Error:         1
+    MAE:                    1.0000
+
+    ⚠️ Not accurate enough. Please upload another image to help improve the model.
+
+
+    📤 Upload a PNG image for attempt 5
+:::
+
+::: {.output .display_data}
+```{=html}
+
+     <input type="file" id="files-876cb439-2e92-497d-b561-2b802c0fffff" name="files[]" multiple disabled
+        style="border:none" />
+     <output id="result-876cb439-2e92-497d-b561-2b802c0fffff">
+      Upload widget is only available when the cell has been executed in the
+      current browser session. Please rerun this cell to enable.
+      </output>
+      <script>// Copyright 2017 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+/**
+ * @fileoverview Helpers for google.colab Python module.
+ */
+(function(scope) {
+function span(text, styleAttributes = {}) {
+  const element = document.createElement('span');
+  element.textContent = text;
+  for (const key of Object.keys(styleAttributes)) {
+    element.style[key] = styleAttributes[key];
+  }
+  return element;
+}
+
+// Max number of bytes which will be uploaded at a time.
+const MAX_PAYLOAD_SIZE = 100 * 1024;
+
+function _uploadFiles(inputId, outputId) {
+  const steps = uploadFilesStep(inputId, outputId);
+  const outputElement = document.getElementById(outputId);
+  // Cache steps on the outputElement to make it available for the next call
+  // to uploadFilesContinue from Python.
+  outputElement.steps = steps;
+
+  return _uploadFilesContinue(outputId);
+}
+
+// This is roughly an async generator (not supported in the browser yet),
+// where there are multiple asynchronous steps and the Python side is going
+// to poll for completion of each step.
+// This uses a Promise to block the python side on completion of each step,
+// then passes the result of the previous step as the input to the next step.
+function _uploadFilesContinue(outputId) {
+  const outputElement = document.getElementById(outputId);
+  const steps = outputElement.steps;
+
+  const next = steps.next(outputElement.lastPromiseValue);
+  return Promise.resolve(next.value.promise).then((value) => {
+    // Cache the last promise value to make it available to the next
+    // step of the generator.
+    outputElement.lastPromiseValue = value;
+    return next.value.response;
+  });
+}
+
+/**
+ * Generator function which is called between each async step of the upload
+ * process.
+ * @param {string} inputId Element ID of the input file picker element.
+ * @param {string} outputId Element ID of the output display.
+ * @return {!Iterable<!Object>} Iterable of next steps.
+ */
+function* uploadFilesStep(inputId, outputId) {
+  const inputElement = document.getElementById(inputId);
+  inputElement.disabled = false;
+
+  const outputElement = document.getElementById(outputId);
+  outputElement.innerHTML = '';
+
+  const pickedPromise = new Promise((resolve) => {
+    inputElement.addEventListener('change', (e) => {
+      resolve(e.target.files);
+    });
+  });
+
+  const cancel = document.createElement('button');
+  inputElement.parentElement.appendChild(cancel);
+  cancel.textContent = 'Cancel upload';
+  const cancelPromise = new Promise((resolve) => {
+    cancel.onclick = () => {
+      resolve(null);
+    };
+  });
+
+  // Wait for the user to pick the files.
+  const files = yield {
+    promise: Promise.race([pickedPromise, cancelPromise]),
+    response: {
+      action: 'starting',
+    }
+  };
+
+  cancel.remove();
+
+  // Disable the input element since further picks are not allowed.
+  inputElement.disabled = true;
+
+  if (!files) {
+    return {
+      response: {
+        action: 'complete',
+      }
+    };
+  }
+
+  for (const file of files) {
+    const li = document.createElement('li');
+    li.append(span(file.name, {fontWeight: 'bold'}));
+    li.append(span(
+        `(${file.type || 'n/a'}) - ${file.size} bytes, ` +
+        `last modified: ${
+            file.lastModifiedDate ? file.lastModifiedDate.toLocaleDateString() :
+                                    'n/a'} - `));
+    const percent = span('0% done');
+    li.appendChild(percent);
+
+    outputElement.appendChild(li);
+
+    const fileDataPromise = new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        resolve(e.target.result);
+      };
+      reader.readAsArrayBuffer(file);
+    });
+    // Wait for the data to be ready.
+    let fileData = yield {
+      promise: fileDataPromise,
+      response: {
+        action: 'continue',
+      }
+    };
+
+    // Use a chunked sending to avoid message size limits. See b/62115660.
+    let position = 0;
+    do {
+      const length = Math.min(fileData.byteLength - position, MAX_PAYLOAD_SIZE);
+      const chunk = new Uint8Array(fileData, position, length);
+      position += length;
+
+      const base64 = btoa(String.fromCharCode.apply(null, chunk));
+      yield {
+        response: {
+          action: 'append',
+          file: file.name,
+          data: base64,
+        },
+      };
+
+      let percentDone = fileData.byteLength === 0 ?
+          100 :
+          Math.round((position / fileData.byteLength) * 100);
+      percent.textContent = `${percentDone}% done`;
+
+    } while (position < fileData.byteLength);
+  }
+
+  // All done.
+  yield {
+    response: {
+      action: 'complete',
+    }
+  };
+}
+
+scope.google = scope.google || {};
+scope.google.colab = scope.google.colab || {};
+scope.google.colab._files = {
+  _uploadFiles,
+  _uploadFilesContinue,
+};
+})(self);
+</script> 
+```
+:::
+
+::: {.output .error ename="KeyboardInterrupt" evalue=""}
+    ---------------------------------------------------------------------------
+    KeyboardInterrupt                         Traceback (most recent call last)
+    /tmp/ipython-input-10-3022492551.py in <cell line: 0>()
+         62 while attempts < 10:
+         63     print(f"\n📤 Upload a PNG image for attempt {attempts + 1}")
+    ---> 64     image_path = upload_image()
+         65 
+         66     image = Image.open(image_path).convert('L')
+
+    /tmp/ipython-input-10-3022492551.py in upload_image()
+         41 # === Upload image ===
+         42 def upload_image():
+    ---> 43     uploaded = files.upload()
+         44     for filename in uploaded.keys():
+         45         return filename
+
+    /usr/local/lib/python3.11/dist-packages/google/colab/files.py in upload(target_dir)
+         70   """
+         71 
+    ---> 72   uploaded_files = _upload_files(multiple=True)
+         73   # Mapping from original filename to filename as saved locally.
+         74   local_filenames = dict()
+
+    /usr/local/lib/python3.11/dist-packages/google/colab/files.py in _upload_files(multiple)
+        162 
+        163   # First result is always an indication that the file picker has completed.
+    --> 164   result = _output.eval_js(
+        165       'google.colab._files._uploadFiles("{input_id}", "{output_id}")'.format(
+        166           input_id=input_id, output_id=output_id
+
+    /usr/local/lib/python3.11/dist-packages/google/colab/output/_js.py in eval_js(script, ignore_result, timeout_sec)
+         38   if ignore_result:
+         39     return
+    ---> 40   return _message.read_reply_from_input(request_id, timeout_sec)
+         41 
+         42 
+
+    /usr/local/lib/python3.11/dist-packages/google/colab/_message.py in read_reply_from_input(message_id, timeout_sec)
+         94     reply = _read_next_input_message()
+         95     if reply == _NOT_READY or not isinstance(reply, dict):
+    ---> 96       time.sleep(0.025)
+         97       continue
+         98     if (
+
+    KeyboardInterrupt: 
+:::
+:::
+
+::: {#YiJNEDNWt11y .cell .markdown id="YiJNEDNWt11y"}
+##Test average outlet channel thickness
+:::
+
+::: {#xSBCCC3GuAc6 .cell .code colab="{\"base_uri\":\"https://localhost:8080/\",\"height\":1000}" id="xSBCCC3GuAc6" outputId="5658039d-a57c-42eb-c5d6-438cee75f778"}
+``` python
+!pip install --upgrade openai matplotlib scipy --quiet
+import openai
+from openai import OpenAI
+import numpy as np
+import matplotlib.pyplot as plt
+from PIL import Image
+import os
+import io
+import re
+
+
+# === SETUP ===
+openai.api_key = "REDACTED"
+client = OpenAI(api_key=openai.api_key)
+base_prompt = """Write a Python function called `outlet_thicknesses()` that calculates the average thickness of outlet channels in a binary or grayscale image represented as a numpy array.
+Inlet channels are on the left and outlet channels are on the right side of the image.
+Outlet thickness should be measured as the vertical span (in normalized units) of each outlet region touching the rightmost edge.
+Return the average outlet thickness as a float between 0 and 1."""
+
+# === Ground truth function (GPT doesn't see this) ===
+def outlet_thicknesses_actual(image_path):
+    image = Image.open(image_path)
+    grayscale_image = image.convert('L')
+    array = np.array(grayscale_image) > 128
+
+    last_col = array[:, -1]
+    thicknesses = []
+    current_run = 0
+
+    for val in last_col:
+        if val == 0:
+            current_run += 1
+        else:
+            if current_run > 0:
+                thicknesses.append(current_run / 256)
+            current_run = 0
+
+    if current_run > 0:
+        thicknesses.append(current_run / 256)
+
+    if len(thicknesses) > 0:
+        return sum(thicknesses) / len(thicknesses)
+    else:
+        return 0
+
+# === Extract Python code from GPT response ===
+def extract_python_code(response_text):
+    matches = re.findall(r"```(?:python)?(.*?)```", response_text, re.DOTALL)
+    return matches[0].strip() if matches else response_text.strip()
+
+# === Prompt GPT to write outlet_thicknesses() ===
+def get_thickness_function_from_gpt(prompt):
+    response = client.chat.completions.create(
+        model="gpt-4o",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0
+    )
+    return response.choices[0].message.content
+
+# === Upload image ===
+def upload_image():
+    uploaded = files.upload()
+    for filename in uploaded.keys():
+        return filename
+
+# === Run the generated function safely with patching ===
+def run_generated_thickness_function(code_str, image_array):
+    import scipy.ndimage  # ensure module is loaded
+    from scipy.ndimage import label as scipy_label
+
+    code_str = extract_python_code(code_str)
+
+    # Prepend import if it's missing from code block (safe fallback)
+    if "label(" in code_str and "from scipy.ndimage import label" not in code_str:
+        code_str = "from scipy.ndimage import label\n" + code_str
+
+    # Make `label` available globally in case it's not in the code
+    globals()["label"] = scipy_label
+
+    local_vars = {}
+    try:
+        exec(code_str, globals(), local_vars)
+        outlet_thicknesses = local_vars.get("outlet_thicknesses")
+        if outlet_thicknesses is None:
+            raise ValueError("Function `outlet_thicknesses()` not found.")
+        return outlet_thicknesses(image_array)
+    except Exception as e:
+        raise RuntimeError(f"Failed to execute generated code: {e}")
+
+
+# === MAIN LOOP ===
+attempts = 0
+mae_list = []
+all_errors = []
+
+while attempts < 10:
+    print(f"\n📤 Upload a PNG image for attempt {attempts + 1}")
+    image_path = upload_image()
+
+    image = Image.open(image_path).convert('L')
+    image_array = np.array(image)
+
+    actual_thickness = outlet_thicknesses_actual(image_path)
+
+    if attempts == 0:
+        prompt = base_prompt
+    else:
+        feedback = f"\n\nFeedback: Your previous estimate had MAE = {mae_list[-1]:.4f}. Please improve the outlet_thicknesses() function."
+        prompt = base_prompt + feedback
+
+    print("🔁 Calling ChatGPT for outlet_thicknesses() function...")
+    code = get_thickness_function_from_gpt(prompt)
+    print("🧠 Function received from GPT:\n", code)
+
+    try:
+        pred_thickness = run_generated_thickness_function(code, image_array)
+    except Exception as e:
+        print("❌ Error running the generated function:", e)
+        mae_list.append(1.0)
+        attempts += 1
+        continue
+
+    error = abs(pred_thickness - actual_thickness)
+    all_errors.append(error)
+    mae = error if attempts == 0 else np.mean(all_errors)
+    mae_list.append(mae)
+
+    print(f"\n✅ Attempt {attempts + 1}:")
+    print(f"Predicted Avg Thickness: {pred_thickness:.4f}")
+    print(f"Actual Avg Thickness:    {actual_thickness:.4f}")
+    print(f"Absolute Error:          {error:.4f}")
+    print(f"MAE:                     {mae:.4f}")
+
+    if mae < 0.1:
+        print("\n🎯 Success: MAE is acceptable. Returning the final outlet_thicknesses() function:\n")
+        print(extract_python_code(code))
+        break
+    else:
+        print("\n⚠️ Not accurate enough. Please upload another image to improve the function.\n")
+
+    attempts += 1
+
+# === PLOT MAE ===
+plt.plot(range(1, len(mae_list)+1), mae_list, marker='o')
+plt.title("Mean Absolute Error (MAE) for outlet_thicknesses()")
+plt.xlabel("Attempt")
+plt.ylabel("MAE")
+plt.grid(True)
+plt.show()
+```
+
+::: {.output .stream .stdout}
+
+    📤 Upload a PNG image for attempt 1
+:::
+
+::: {.output .display_data}
+```{=html}
+
+     <input type="file" id="files-1d969a6e-7c56-4469-81b5-2a49126ab572" name="files[]" multiple disabled
+        style="border:none" />
+     <output id="result-1d969a6e-7c56-4469-81b5-2a49126ab572">
+      Upload widget is only available when the cell has been executed in the
+      current browser session. Please rerun this cell to enable.
+      </output>
+      <script>// Copyright 2017 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+/**
+ * @fileoverview Helpers for google.colab Python module.
+ */
+(function(scope) {
+function span(text, styleAttributes = {}) {
+  const element = document.createElement('span');
+  element.textContent = text;
+  for (const key of Object.keys(styleAttributes)) {
+    element.style[key] = styleAttributes[key];
+  }
+  return element;
+}
+
+// Max number of bytes which will be uploaded at a time.
+const MAX_PAYLOAD_SIZE = 100 * 1024;
+
+function _uploadFiles(inputId, outputId) {
+  const steps = uploadFilesStep(inputId, outputId);
+  const outputElement = document.getElementById(outputId);
+  // Cache steps on the outputElement to make it available for the next call
+  // to uploadFilesContinue from Python.
+  outputElement.steps = steps;
+
+  return _uploadFilesContinue(outputId);
+}
+
+// This is roughly an async generator (not supported in the browser yet),
+// where there are multiple asynchronous steps and the Python side is going
+// to poll for completion of each step.
+// This uses a Promise to block the python side on completion of each step,
+// then passes the result of the previous step as the input to the next step.
+function _uploadFilesContinue(outputId) {
+  const outputElement = document.getElementById(outputId);
+  const steps = outputElement.steps;
+
+  const next = steps.next(outputElement.lastPromiseValue);
+  return Promise.resolve(next.value.promise).then((value) => {
+    // Cache the last promise value to make it available to the next
+    // step of the generator.
+    outputElement.lastPromiseValue = value;
+    return next.value.response;
+  });
+}
+
+/**
+ * Generator function which is called between each async step of the upload
+ * process.
+ * @param {string} inputId Element ID of the input file picker element.
+ * @param {string} outputId Element ID of the output display.
+ * @return {!Iterable<!Object>} Iterable of next steps.
+ */
+function* uploadFilesStep(inputId, outputId) {
+  const inputElement = document.getElementById(inputId);
+  inputElement.disabled = false;
+
+  const outputElement = document.getElementById(outputId);
+  outputElement.innerHTML = '';
+
+  const pickedPromise = new Promise((resolve) => {
+    inputElement.addEventListener('change', (e) => {
+      resolve(e.target.files);
+    });
+  });
+
+  const cancel = document.createElement('button');
+  inputElement.parentElement.appendChild(cancel);
+  cancel.textContent = 'Cancel upload';
+  const cancelPromise = new Promise((resolve) => {
+    cancel.onclick = () => {
+      resolve(null);
+    };
+  });
+
+  // Wait for the user to pick the files.
+  const files = yield {
+    promise: Promise.race([pickedPromise, cancelPromise]),
+    response: {
+      action: 'starting',
+    }
+  };
+
+  cancel.remove();
+
+  // Disable the input element since further picks are not allowed.
+  inputElement.disabled = true;
+
+  if (!files) {
+    return {
+      response: {
+        action: 'complete',
+      }
+    };
+  }
+
+  for (const file of files) {
+    const li = document.createElement('li');
+    li.append(span(file.name, {fontWeight: 'bold'}));
+    li.append(span(
+        `(${file.type || 'n/a'}) - ${file.size} bytes, ` +
+        `last modified: ${
+            file.lastModifiedDate ? file.lastModifiedDate.toLocaleDateString() :
+                                    'n/a'} - `));
+    const percent = span('0% done');
+    li.appendChild(percent);
+
+    outputElement.appendChild(li);
+
+    const fileDataPromise = new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        resolve(e.target.result);
+      };
+      reader.readAsArrayBuffer(file);
+    });
+    // Wait for the data to be ready.
+    let fileData = yield {
+      promise: fileDataPromise,
+      response: {
+        action: 'continue',
+      }
+    };
+
+    // Use a chunked sending to avoid message size limits. See b/62115660.
+    let position = 0;
+    do {
+      const length = Math.min(fileData.byteLength - position, MAX_PAYLOAD_SIZE);
+      const chunk = new Uint8Array(fileData, position, length);
+      position += length;
+
+      const base64 = btoa(String.fromCharCode.apply(null, chunk));
+      yield {
+        response: {
+          action: 'append',
+          file: file.name,
+          data: base64,
+        },
+      };
+
+      let percentDone = fileData.byteLength === 0 ?
+          100 :
+          Math.round((position / fileData.byteLength) * 100);
+      percent.textContent = `${percentDone}% done`;
+
+    } while (position < fileData.byteLength);
+  }
+
+  // All done.
+  yield {
+    response: {
+      action: 'complete',
+    }
+  };
+}
+
+scope.google = scope.google || {};
+scope.google.colab = scope.google.colab || {};
+scope.google.colab._files = {
+  _uploadFiles,
+  _uploadFilesContinue,
+};
+})(self);
+</script> 
+```
+:::
+
+::: {.output .stream .stdout}
+    Saving design_80.png to design_80 (8).png
+    🔁 Calling ChatGPT for outlet_thicknesses() function...
+    🧠 Function received from GPT:
+     To calculate the average thickness of outlet channels in a binary or grayscale image, we can follow these steps:
+
+    1. Identify the outlet channels touching the rightmost edge of the image.
+    2. Measure the vertical span of each outlet channel.
+    3. Normalize the thickness by dividing by the total height of the image.
+    4. Calculate the average thickness of all outlet channels.
+
+    Here's a Python function that implements this logic using the `numpy` library:
+
+    ```python
+    import numpy as np
+    from scipy.ndimage import label
+
+    def outlet_thicknesses(image):
+        """
+        Calculate the average thickness of outlet channels in a binary or grayscale image.
+
+        Parameters:
+        - image: numpy array representing the binary or grayscale image.
+
+        Returns:
+        - Average outlet thickness as a float between 0 and 1.
+        """
+        # Ensure the image is a binary image
+        if image.dtype != np.bool:
+            # Convert grayscale to binary by thresholding
+            image = image > 0
+
+        # Get the rightmost column
+        rightmost_column = image[:, -1]
+
+        # Label connected components in the rightmost column
+        labeled_array, num_features = label(rightmost_column)
+
+        # Calculate the thickness of each outlet channel
+        thicknesses = []
+        for i in range(1, num_features + 1):
+            # Find the vertical span of the current outlet channel
+            positions = np.where(labeled_array == i)[0]
+            if positions.size > 0:
+                thickness = positions[-1] - positions[0] + 1
+                thicknesses.append(thickness)
+
+        # Normalize thicknesses by the height of the image
+        height = image.shape[0]
+        normalized_thicknesses = [thickness / height for thickness in thicknesses]
+
+        # Calculate the average thickness
+        if normalized_thicknesses:
+            average_thickness = np.mean(normalized_thicknesses)
+        else:
+            average_thickness = 0.0
+
+        return average_thickness
+
+    # Example usage:
+    # image = np.array([[0, 0, 0, 1],
+    #                   [0, 0, 0, 1],
+    #                   [0, 0, 0, 0],
+    #                   [0, 0, 0, 1]])
+    # print(outlet_thicknesses(image))  # Output: 0.75
+    ```
+
+    ### Explanation:
+    - **Binary Conversion**: The function first ensures that the image is binary. If the image is grayscale, it converts it to binary by thresholding (assuming any non-zero value is part of a channel).
+    - **Labeling**: It uses `scipy.ndimage.label` to identify connected components in the rightmost column of the image.
+    - **Thickness Calculation**: For each labeled component, it calculates the vertical span (thickness) and normalizes it by the image height.
+    - **Average Calculation**: Finally, it computes the average of these normalized thicknesses. If there are no outlet channels, it returns 0.0.
+
+    ✅ Attempt 1:
+    Predicted Avg Thickness: 0.2109
+    Actual Avg Thickness:    0.1836
+    Absolute Error:          0.0273
+    MAE:                     0.0273
+
+    🎯 Success: MAE is acceptable. Returning the final outlet_thicknesses() function:
+
+    import numpy as np
+    from scipy.ndimage import label
+
+    def outlet_thicknesses(image):
+        """
+        Calculate the average thickness of outlet channels in a binary or grayscale image.
+
+        Parameters:
+        - image: numpy array representing the binary or grayscale image.
+
+        Returns:
+        - Average outlet thickness as a float between 0 and 1.
+        """
+        # Ensure the image is a binary image
+        if image.dtype != np.bool:
+            # Convert grayscale to binary by thresholding
+            image = image > 0
+
+        # Get the rightmost column
+        rightmost_column = image[:, -1]
+
+        # Label connected components in the rightmost column
+        labeled_array, num_features = label(rightmost_column)
+
+        # Calculate the thickness of each outlet channel
+        thicknesses = []
+        for i in range(1, num_features + 1):
+            # Find the vertical span of the current outlet channel
+            positions = np.where(labeled_array == i)[0]
+            if positions.size > 0:
+                thickness = positions[-1] - positions[0] + 1
+                thicknesses.append(thickness)
+
+        # Normalize thicknesses by the height of the image
+        height = image.shape[0]
+        normalized_thicknesses = [thickness / height for thickness in thicknesses]
+
+        # Calculate the average thickness
+        if normalized_thicknesses:
+            average_thickness = np.mean(normalized_thicknesses)
+        else:
+            average_thickness = 0.0
+
+        return average_thickness
+
+    # Example usage:
+    # image = np.array([[0, 0, 0, 1],
+    #                   [0, 0, 0, 1],
+    #                   [0, 0, 0, 0],
+    #                   [0, 0, 0, 1]])
+    # print(outlet_thicknesses(image))  # Output: 0.75
+:::
+
+::: {.output .display_data}
+![](vertopal_27a7b2c2d5ee4fc489a589b8808a77a5/b54dfca686eb3e0fb32c09baa81a6eb67f294d92.png)
+:::
+:::
+
+::: {#eTojn0SjhIGX .cell .markdown id="eTojn0SjhIGX"}
+##Test average intlet channel thickness
+:::
+
+::: {#FKOGqLGuhLat .cell .code colab="{\"base_uri\":\"https://localhost:8080/\",\"height\":1000}" id="FKOGqLGuhLat" outputId="fb741f44-caaf-4db0-9b5b-1479619c1967"}
+``` python
+# === Prompt for GPT ===
+base_prompt = """Write a Python function called `inlet_thicknesses()` that calculates the average thickness of inlet channels in a binary or grayscale image represented as a numpy array.
+Inlet channels are located on the **left edge** of the image, and outlet channels are on the right.
+Inlet thickness should be measured as the vertical span (in normalized units) of each inlet region touching the leftmost edge.
+Return the average inlet thickness as a float between 0 and 1."""
+
+# === Ground Truth Function ===
+def inlet_thicknesses_actual(image_path):
+    image = Image.open(image_path)
+    grayscale_image = image.convert('L')
+    array = np.array(grayscale_image) > 128
+
+    first_col = array[:, 0]
+    thicknesses = []
+    current_run = 0
+
+    for val in first_col:
+        if val == 0:
+            current_run += 1
+        else:
+            if current_run > 0:
+                thicknesses.append(current_run / 256)
+            current_run = 0
+
+    if current_run > 0:
+        thicknesses.append(current_run / 256)
+
+    if len(thicknesses) > 0:
+        return sum(thicknesses) / len(thicknesses)
+    else:
+        return 0
+
+# === Helpers ===
+def extract_python_code(response_text):
+    matches = re.findall(r"```(?:python)?(.*?)```", response_text, re.DOTALL)
+    return matches[0].strip() if matches else response_text.strip()
+
+def get_inlet_function_from_gpt(prompt):
+    response = client.chat.completions.create(
+        model="gpt-4o",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0
+    )
+    return response.choices[0].message.content
+
+def upload_image():
+    uploaded = files.upload()
+    for filename in uploaded.keys():
+        return filename
+
+# === Safe Function Runner with Global Patch for `label` ===
+def run_generated_inlet_function(code_str, image_array):
+    import scipy.ndimage
+    from scipy.ndimage import label as scipy_label
+
+    code_str = extract_python_code(code_str)
+
+    # Patch if `label` is referenced
+    if "label(" in code_str and "from scipy.ndimage import label" not in code_str:
+        code_str = "from scipy.ndimage import label\n" + code_str
+
+    globals()["label"] = scipy_label  # ensure label() resolves
+
+    local_vars = {}
+    try:
+        exec(code_str, globals(), local_vars)
+        inlet_thicknesses = local_vars.get("inlet_thicknesses")
+        if inlet_thicknesses is None:
+            raise ValueError("Function `inlet_thicknesses()` not found.")
+        return inlet_thicknesses(image_array)
+    except Exception as e:
+        raise RuntimeError(f"Failed to execute generated code: {e}")
+
+# === MAIN LOOP ===
+attempts = 0
+mae_list = []
+all_errors = []
+
+while attempts < 10:
+    print(f"\n📤 Upload a PNG image for attempt {attempts + 1}")
+    image_path = upload_image()
+
+    image = Image.open(image_path).convert('L')
+    image_array = np.array(image)
+
+    actual_thickness = inlet_thicknesses_actual(image_path)
+
+    if attempts == 0:
+        prompt = base_prompt
+    else:
+        prompt = base_prompt + f"\n\nFeedback: Your previous estimate had MAE = {mae_list[-1]:.4f}. Please improve the inlet_thicknesses() function."
+
+    print("🔁 Calling ChatGPT for inlet_thicknesses() function...")
+    code = get_inlet_function_from_gpt(prompt)
+    print("🧠 Function received from GPT:\n", code)
+
+    try:
+        pred_thickness = run_generated_inlet_function(code, image_array)
+    except Exception as e:
+        print("❌ Error running the generated function:", e)
+        mae_list.append(1.0)
+        attempts += 1
+        continue
+
+    error = abs(pred_thickness - actual_thickness)
+    all_errors.append(error)
+    mae = error if attempts == 0 else np.mean(all_errors)
+    mae_list.append(mae)
+
+    print(f"\n✅ Attempt {attempts + 1}:")
+    print(f"Predicted Avg Inlet Thickness: {pred_thickness:.4f}")
+    print(f"Actual Avg Inlet Thickness:    {actual_thickness:.4f}")
+    print(f"Absolute Error:                {error:.4f}")
+    print(f"MAE:                           {mae:.4f}")
+
+    if mae < 0.1:
+        print("\n🎯 Success: MAE is acceptable. Returning the final inlet_thicknesses() function:\n")
+        print(extract_python_code(code))
+        break
+    else:
+        print("\n⚠️ Not accurate enough. Please upload another image to improve the function.\n")
+
+    attempts += 1
+
+# === PLOT MAE ===
+plt.plot(range(1, len(mae_list)+1), mae_list, marker='o')
+plt.title("Mean Absolute Error (MAE) for inlet_thicknesses()")
+plt.xlabel("Attempt")
+plt.ylabel("MAE")
+plt.grid(True)
+plt.show()
+```
+
+::: {.output .stream .stdout}
+
+    📤 Upload a PNG image for attempt 1
+:::
+
+::: {.output .display_data}
+```{=html}
+
+     <input type="file" id="files-c855b650-ca33-4275-9fdc-b98afc3e4ea5" name="files[]" multiple disabled
+        style="border:none" />
+     <output id="result-c855b650-ca33-4275-9fdc-b98afc3e4ea5">
+      Upload widget is only available when the cell has been executed in the
+      current browser session. Please rerun this cell to enable.
+      </output>
+      <script>// Copyright 2017 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+/**
+ * @fileoverview Helpers for google.colab Python module.
+ */
+(function(scope) {
+function span(text, styleAttributes = {}) {
+  const element = document.createElement('span');
+  element.textContent = text;
+  for (const key of Object.keys(styleAttributes)) {
+    element.style[key] = styleAttributes[key];
+  }
+  return element;
+}
+
+// Max number of bytes which will be uploaded at a time.
+const MAX_PAYLOAD_SIZE = 100 * 1024;
+
+function _uploadFiles(inputId, outputId) {
+  const steps = uploadFilesStep(inputId, outputId);
+  const outputElement = document.getElementById(outputId);
+  // Cache steps on the outputElement to make it available for the next call
+  // to uploadFilesContinue from Python.
+  outputElement.steps = steps;
+
+  return _uploadFilesContinue(outputId);
+}
+
+// This is roughly an async generator (not supported in the browser yet),
+// where there are multiple asynchronous steps and the Python side is going
+// to poll for completion of each step.
+// This uses a Promise to block the python side on completion of each step,
+// then passes the result of the previous step as the input to the next step.
+function _uploadFilesContinue(outputId) {
+  const outputElement = document.getElementById(outputId);
+  const steps = outputElement.steps;
+
+  const next = steps.next(outputElement.lastPromiseValue);
+  return Promise.resolve(next.value.promise).then((value) => {
+    // Cache the last promise value to make it available to the next
+    // step of the generator.
+    outputElement.lastPromiseValue = value;
+    return next.value.response;
+  });
+}
+
+/**
+ * Generator function which is called between each async step of the upload
+ * process.
+ * @param {string} inputId Element ID of the input file picker element.
+ * @param {string} outputId Element ID of the output display.
+ * @return {!Iterable<!Object>} Iterable of next steps.
+ */
+function* uploadFilesStep(inputId, outputId) {
+  const inputElement = document.getElementById(inputId);
+  inputElement.disabled = false;
+
+  const outputElement = document.getElementById(outputId);
+  outputElement.innerHTML = '';
+
+  const pickedPromise = new Promise((resolve) => {
+    inputElement.addEventListener('change', (e) => {
+      resolve(e.target.files);
+    });
+  });
+
+  const cancel = document.createElement('button');
+  inputElement.parentElement.appendChild(cancel);
+  cancel.textContent = 'Cancel upload';
+  const cancelPromise = new Promise((resolve) => {
+    cancel.onclick = () => {
+      resolve(null);
+    };
+  });
+
+  // Wait for the user to pick the files.
+  const files = yield {
+    promise: Promise.race([pickedPromise, cancelPromise]),
+    response: {
+      action: 'starting',
+    }
+  };
+
+  cancel.remove();
+
+  // Disable the input element since further picks are not allowed.
+  inputElement.disabled = true;
+
+  if (!files) {
+    return {
+      response: {
+        action: 'complete',
+      }
+    };
+  }
+
+  for (const file of files) {
+    const li = document.createElement('li');
+    li.append(span(file.name, {fontWeight: 'bold'}));
+    li.append(span(
+        `(${file.type || 'n/a'}) - ${file.size} bytes, ` +
+        `last modified: ${
+            file.lastModifiedDate ? file.lastModifiedDate.toLocaleDateString() :
+                                    'n/a'} - `));
+    const percent = span('0% done');
+    li.appendChild(percent);
+
+    outputElement.appendChild(li);
+
+    const fileDataPromise = new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        resolve(e.target.result);
+      };
+      reader.readAsArrayBuffer(file);
+    });
+    // Wait for the data to be ready.
+    let fileData = yield {
+      promise: fileDataPromise,
+      response: {
+        action: 'continue',
+      }
+    };
+
+    // Use a chunked sending to avoid message size limits. See b/62115660.
+    let position = 0;
+    do {
+      const length = Math.min(fileData.byteLength - position, MAX_PAYLOAD_SIZE);
+      const chunk = new Uint8Array(fileData, position, length);
+      position += length;
+
+      const base64 = btoa(String.fromCharCode.apply(null, chunk));
+      yield {
+        response: {
+          action: 'append',
+          file: file.name,
+          data: base64,
+        },
+      };
+
+      let percentDone = fileData.byteLength === 0 ?
+          100 :
+          Math.round((position / fileData.byteLength) * 100);
+      percent.textContent = `${percentDone}% done`;
+
+    } while (position < fileData.byteLength);
+  }
+
+  // All done.
+  yield {
+    response: {
+      action: 'complete',
+    }
+  };
+}
+
+scope.google = scope.google || {};
+scope.google.colab = scope.google.colab || {};
+scope.google.colab._files = {
+  _uploadFiles,
+  _uploadFilesContinue,
+};
+})(self);
+</script> 
+```
+:::
+
+::: {.output .stream .stdout}
+    Saving design_80.png to design_80 (1).png
+    🔁 Calling ChatGPT for inlet_thicknesses() function...
+    🧠 Function received from GPT:
+     To calculate the average thickness of inlet channels in a binary or grayscale image, we need to identify the connected regions on the left edge of the image and measure their vertical spans. Here's a step-by-step implementation of the `inlet_thicknesses()` function:
+
+    ```python
+    import numpy as np
+    from scipy.ndimage import label
+
+    def inlet_thicknesses(image):
+        """
+        Calculate the average thickness of inlet channels on the left edge of the image.
+
+        Parameters:
+        - image: A 2D numpy array representing a binary or grayscale image.
+
+        Returns:
+        - A float representing the average inlet thickness, normalized between 0 and 1.
+        """
+        # Ensure the image is binary
+        if image.dtype != np.bool:
+            # Convert grayscale to binary using a threshold
+            threshold = image.max() / 2
+            binary_image = image > threshold
+        else:
+            binary_image = image
+
+        # Extract the leftmost column
+        left_edge = binary_image[:, 0]
+
+        # Label connected components on the left edge
+        labeled_array, num_features = label(left_edge)
+
+        # Calculate the thickness of each inlet channel
+        thicknesses = []
+        for i in range(1, num_features + 1):
+            # Find the vertical span of each labeled region
+            positions = np.where(labeled_array == i)[0]
+            if positions.size > 0:
+                thickness = positions[-1] - positions[0] + 1
+                thicknesses.append(thickness)
+
+        # Normalize thicknesses by the height of the image
+        image_height = image.shape[0]
+        normalized_thicknesses = [t / image_height for t in thicknesses]
+
+        # Calculate the average thickness
+        if normalized_thicknesses:
+            average_thickness = np.mean(normalized_thicknesses)
+        else:
+            average_thickness = 0.0
+
+        return average_thickness
+
+    # Example usage:
+    # image = np.array([[0, 0, 0], [1, 0, 0], [1, 0, 0], [0, 0, 0]])
+    # print(inlet_thicknesses(image))  # Output: 0.5
+    ```
+
+    ### Explanation:
+
+    1. **Binary Conversion**: The function first checks if the image is binary. If not, it converts a grayscale image to binary using a threshold (half of the maximum pixel value).
+
+    2. **Left Edge Extraction**: It extracts the leftmost column of the image, which represents the potential inlet channels.
+
+    3. **Labeling**: The `scipy.ndimage.label` function is used to label connected components in the left edge column.
+
+    4. **Thickness Calculation**: For each labeled region, the function calculates the vertical span (thickness) by finding the difference between the maximum and minimum indices of the region.
+
+    5. **Normalization**: The thicknesses are normalized by dividing by the total height of the image.
+
+    6. **Average Calculation**: Finally, the function computes the average of the normalized thicknesses. If there are no inlet channels, it returns 0.0.
+
+    This function should work for both binary and grayscale images, providing a normalized average thickness of inlet channels.
+
+    ✅ Attempt 1:
+    Predicted Avg Inlet Thickness: 0.2949
+    Actual Avg Inlet Thickness:    0.4102
+    Absolute Error:                0.1152
+    MAE:                           0.1152
+
+    ⚠️ Not accurate enough. Please upload another image to improve the function.
+
+
+    📤 Upload a PNG image for attempt 2
+:::
+
+::: {.output .display_data}
+```{=html}
+
+     <input type="file" id="files-e3c382bd-79e0-439e-b53d-c8be00de7455" name="files[]" multiple disabled
+        style="border:none" />
+     <output id="result-e3c382bd-79e0-439e-b53d-c8be00de7455">
+      Upload widget is only available when the cell has been executed in the
+      current browser session. Please rerun this cell to enable.
+      </output>
+      <script>// Copyright 2017 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+/**
+ * @fileoverview Helpers for google.colab Python module.
+ */
+(function(scope) {
+function span(text, styleAttributes = {}) {
+  const element = document.createElement('span');
+  element.textContent = text;
+  for (const key of Object.keys(styleAttributes)) {
+    element.style[key] = styleAttributes[key];
+  }
+  return element;
+}
+
+// Max number of bytes which will be uploaded at a time.
+const MAX_PAYLOAD_SIZE = 100 * 1024;
+
+function _uploadFiles(inputId, outputId) {
+  const steps = uploadFilesStep(inputId, outputId);
+  const outputElement = document.getElementById(outputId);
+  // Cache steps on the outputElement to make it available for the next call
+  // to uploadFilesContinue from Python.
+  outputElement.steps = steps;
+
+  return _uploadFilesContinue(outputId);
+}
+
+// This is roughly an async generator (not supported in the browser yet),
+// where there are multiple asynchronous steps and the Python side is going
+// to poll for completion of each step.
+// This uses a Promise to block the python side on completion of each step,
+// then passes the result of the previous step as the input to the next step.
+function _uploadFilesContinue(outputId) {
+  const outputElement = document.getElementById(outputId);
+  const steps = outputElement.steps;
+
+  const next = steps.next(outputElement.lastPromiseValue);
+  return Promise.resolve(next.value.promise).then((value) => {
+    // Cache the last promise value to make it available to the next
+    // step of the generator.
+    outputElement.lastPromiseValue = value;
+    return next.value.response;
+  });
+}
+
+/**
+ * Generator function which is called between each async step of the upload
+ * process.
+ * @param {string} inputId Element ID of the input file picker element.
+ * @param {string} outputId Element ID of the output display.
+ * @return {!Iterable<!Object>} Iterable of next steps.
+ */
+function* uploadFilesStep(inputId, outputId) {
+  const inputElement = document.getElementById(inputId);
+  inputElement.disabled = false;
+
+  const outputElement = document.getElementById(outputId);
+  outputElement.innerHTML = '';
+
+  const pickedPromise = new Promise((resolve) => {
+    inputElement.addEventListener('change', (e) => {
+      resolve(e.target.files);
+    });
+  });
+
+  const cancel = document.createElement('button');
+  inputElement.parentElement.appendChild(cancel);
+  cancel.textContent = 'Cancel upload';
+  const cancelPromise = new Promise((resolve) => {
+    cancel.onclick = () => {
+      resolve(null);
+    };
+  });
+
+  // Wait for the user to pick the files.
+  const files = yield {
+    promise: Promise.race([pickedPromise, cancelPromise]),
+    response: {
+      action: 'starting',
+    }
+  };
+
+  cancel.remove();
+
+  // Disable the input element since further picks are not allowed.
+  inputElement.disabled = true;
+
+  if (!files) {
+    return {
+      response: {
+        action: 'complete',
+      }
+    };
+  }
+
+  for (const file of files) {
+    const li = document.createElement('li');
+    li.append(span(file.name, {fontWeight: 'bold'}));
+    li.append(span(
+        `(${file.type || 'n/a'}) - ${file.size} bytes, ` +
+        `last modified: ${
+            file.lastModifiedDate ? file.lastModifiedDate.toLocaleDateString() :
+                                    'n/a'} - `));
+    const percent = span('0% done');
+    li.appendChild(percent);
+
+    outputElement.appendChild(li);
+
+    const fileDataPromise = new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        resolve(e.target.result);
+      };
+      reader.readAsArrayBuffer(file);
+    });
+    // Wait for the data to be ready.
+    let fileData = yield {
+      promise: fileDataPromise,
+      response: {
+        action: 'continue',
+      }
+    };
+
+    // Use a chunked sending to avoid message size limits. See b/62115660.
+    let position = 0;
+    do {
+      const length = Math.min(fileData.byteLength - position, MAX_PAYLOAD_SIZE);
+      const chunk = new Uint8Array(fileData, position, length);
+      position += length;
+
+      const base64 = btoa(String.fromCharCode.apply(null, chunk));
+      yield {
+        response: {
+          action: 'append',
+          file: file.name,
+          data: base64,
+        },
+      };
+
+      let percentDone = fileData.byteLength === 0 ?
+          100 :
+          Math.round((position / fileData.byteLength) * 100);
+      percent.textContent = `${percentDone}% done`;
+
+    } while (position < fileData.byteLength);
+  }
+
+  // All done.
+  yield {
+    response: {
+      action: 'complete',
+    }
+  };
+}
+
+scope.google = scope.google || {};
+scope.google.colab = scope.google.colab || {};
+scope.google.colab._files = {
+  _uploadFiles,
+  _uploadFilesContinue,
+};
+})(self);
+</script> 
+```
+:::
+
+::: {.output .stream .stdout}
+    Saving design_11.png to design_11.png
+    🔁 Calling ChatGPT for inlet_thicknesses() function...
+    🧠 Function received from GPT:
+     To improve the `inlet_thicknesses()` function, we need to ensure that we accurately identify and measure the vertical span of inlet channels touching the left edge of the image. The function should handle both binary and grayscale images, where inlet channels are represented by non-zero values. Here's an improved version of the function:
+
+    ```python
+    import numpy as np
+    from scipy.ndimage import label
+
+    def inlet_thicknesses(image):
+        """
+        Calculate the average thickness of inlet channels in a binary or grayscale image.
+
+        Parameters:
+        - image: A 2D numpy array representing the image.
+
+        Returns:
+        - A float representing the average inlet thickness, normalized between 0 and 1.
+        """
+        # Ensure the image is a numpy array
+        image = np.asarray(image)
+        
+        # Threshold the image to binary if it's grayscale
+        if image.dtype != bool:
+            image = image > 0  # Convert to binary: True for inlet channels, False otherwise
+
+        # Extract the leftmost column
+        left_edge = image[:, 0]
+
+        # Label connected components on the left edge
+        labeled_array, num_features = label(left_edge)
+
+        # Calculate the thickness of each inlet channel
+        inlet_thicknesses = []
+        for i in range(1, num_features + 1):
+            # Find the vertical span of each labeled region
+            region_indices = np.where(labeled_array == i)[0]
+            if region_indices.size > 0:
+                thickness = region_indices[-1] - region_indices[0] + 1
+                inlet_thicknesses.append(thickness)
+
+        # Normalize thicknesses by the height of the image
+        image_height = image.shape[0]
+        normalized_thicknesses = [thickness / image_height for thickness in inlet_thicknesses]
+
+        # Calculate the average thickness
+        if normalized_thicknesses:
+            average_thickness = np.mean(normalized_thicknesses)
+        else:
+            average_thickness = 0.0
+
+        return average_thickness
+
+    # Example usage:
+    # image = np.array([[0, 0, 0], [1, 0, 0], [1, 0, 0], [0, 0, 0]])
+    # print(inlet_thicknesses(image))  # Output should be 0.5 for this example
+    ```
+
+    ### Key Improvements:
+    1. **Binary Conversion**: The function now explicitly converts grayscale images to binary by thresholding, ensuring that any non-zero pixel is considered part of an inlet channel.
+    2. **Connected Component Labeling**: We use `scipy.ndimage.label` to identify connected components on the left edge, which helps in accurately measuring the vertical span of each inlet channel.
+    3. **Normalization**: The thickness of each inlet channel is normalized by the height of the image to ensure the result is between 0 and 1.
+    4. **Robustness**: The function handles cases where there are no inlet channels by returning an average thickness of 0.0.
+
+    This approach should provide a more accurate estimate of the average inlet thickness, reducing the mean absolute error (MAE) in your application.
+
+    ✅ Attempt 2:
+    Predicted Avg Inlet Thickness: 0.1348
+    Actual Avg Inlet Thickness:    0.1536
+    Absolute Error:                0.0189
+    MAE:                           0.0671
+
+    🎯 Success: MAE is acceptable. Returning the final inlet_thicknesses() function:
+
+    import numpy as np
+    from scipy.ndimage import label
+
+    def inlet_thicknesses(image):
+        """
+        Calculate the average thickness of inlet channels in a binary or grayscale image.
+
+        Parameters:
+        - image: A 2D numpy array representing the image.
+
+        Returns:
+        - A float representing the average inlet thickness, normalized between 0 and 1.
+        """
+        # Ensure the image is a numpy array
+        image = np.asarray(image)
+        
+        # Threshold the image to binary if it's grayscale
+        if image.dtype != bool:
+            image = image > 0  # Convert to binary: True for inlet channels, False otherwise
+
+        # Extract the leftmost column
+        left_edge = image[:, 0]
+
+        # Label connected components on the left edge
+        labeled_array, num_features = label(left_edge)
+
+        # Calculate the thickness of each inlet channel
+        inlet_thicknesses = []
+        for i in range(1, num_features + 1):
+            # Find the vertical span of each labeled region
+            region_indices = np.where(labeled_array == i)[0]
+            if region_indices.size > 0:
+                thickness = region_indices[-1] - region_indices[0] + 1
+                inlet_thicknesses.append(thickness)
+
+        # Normalize thicknesses by the height of the image
+        image_height = image.shape[0]
+        normalized_thicknesses = [thickness / image_height for thickness in inlet_thicknesses]
+
+        # Calculate the average thickness
+        if normalized_thicknesses:
+            average_thickness = np.mean(normalized_thicknesses)
+        else:
+            average_thickness = 0.0
+
+        return average_thickness
+
+    # Example usage:
+    # image = np.array([[0, 0, 0], [1, 0, 0], [1, 0, 0], [0, 0, 0]])
+    # print(inlet_thicknesses(image))  # Output should be 0.5 for this example
+:::
+
+::: {.output .display_data}
+![](vertopal_27a7b2c2d5ee4fc489a589b8808a77a5/f52fc9fb0322a9efc9c3c071675b4f2a8d8e8b9a.png)
+:::
+:::
+
+::: {#ifUUVpO_bQ24 .cell .markdown id="ifUUVpO_bQ24"}
+##Test perimeter function MAE \< 100
+:::
+
+::: {#o-TEKbRtbW44 .cell .code colab="{\"base_uri\":\"https://localhost:8080/\",\"height\":377}" id="o-TEKbRtbW44" outputId="73b8004c-c35d-4e8b-963c-f7b33ad4651d"}
+``` python
+# === GPT sees these two helpers ===
+subtract_inlet_definition = """
+def subtract_inlet(array):
+    first_col = array[:, 0]
+    thicknesses = []
+    current_run = 0
+    for val in first_col:
+        if val == 0:
+            current_run += 1
+        else:
+            if current_run > 0:
+                thicknesses.append(current_run)
+            current_run = 0
+    if current_run > 0:
+        thicknesses.append(current_run)
+    return sum(thicknesses)
+"""
+
+subtract_outlet_definition = """
+def subtract_outlet(array):
+    last_col = array[:, -1]
+    thicknesses = []
+    current_run = 0
+    for val in last_col:
+        if val == 0:
+            current_run += 1
+        else:
+            if current_run > 0:
+                thicknesses.append(current_run)
+            current_run = 0
+    if current_run > 0:
+        thicknesses.append(current_run)
+    return sum(thicknesses)
+"""
+
+base_prompt = f"""
+Below are two helper functions used in the image analysis task:
+
+{subtract_inlet_definition}
+
+{subtract_outlet_definition}
+
+Now, write a function `perimeter(array)` that calculates the perimeter of the black (fluid) region in a binary numpy array.
+- The fluid regions are black (0); background is white (1).
+- Use OpenCV or numpy to find contours.
+- Pad the array if needed to ensure contour detection.
+- Subtract inlet and outlet channel sizes using the two helper functions above.
+- Return a float representing the fluid region perimeter.
+"""
+
+# === Ground Truth Function (GPT does NOT see this) ===
+def perimeter_actual(image_path):
+    image = Image.open(image_path)
+    grayscale_image = image.convert('L')
+    array = np.array(grayscale_image) > 128
+    array = array.squeeze()
+
+    inlet = subtract_inlet_actual(array)
+    outlet = subtract_outlet_actual(array)
+
+    array = np.pad(array, pad_width=1, mode='constant', constant_values=0)
+    img = cv2.cvtColor(array.astype(np.uint8), cv2.COLOR_GRAY2BGR)
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    gray = cv2.convertScaleAbs(gray)
+
+    contours, _ = cv2.findContours(gray, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    if contours:
+        height, width = array.shape
+        corner_points = np.array([[0, 0], [width - 1, 0], [width - 1, height - 1], [0, height - 1]])
+        corner_points_list = corner_points.tolist()
+        filtered_contours = []
+
+        for cnt in contours:
+            cnt_array = cnt.reshape(-1, 2)
+            filtered_cnt = cnt_array[~np.any(np.isin(cnt_array, corner_points_list), axis=1)]
+            filtered_contours.append(filtered_cnt)
+
+        total_perimeter = sum(cv2.arcLength(cnt, True) for cnt in filtered_contours)
+        actual_perimeter = total_perimeter - 2*514 - (2 * 258 - inlet - outlet)
+        return actual_perimeter
+    else:
+        return 0
+
+def subtract_inlet_actual(array):
+    first_col = array[:, 0]
+    thicknesses = []
+    current_run = 0
+    for val in first_col:
+        if val == 0:
+            current_run += 1
+        else:
+            if current_run > 0:
+                thicknesses.append(current_run)
+            current_run = 0
+    if current_run > 0:
+        thicknesses.append(current_run)
+    return sum(thicknesses)
+
+def subtract_outlet_actual(array):
+    last_col = array[:, -1]
+    thicknesses = []
+    current_run = 0
+    for val in last_col:
+        if val == 0:
+            current_run += 1
+        else:
+            if current_run > 0:
+                thicknesses.append(current_run)
+            current_run = 0
+    if current_run > 0:
+        thicknesses.append(current_run)
+    return sum(thicknesses)
+
+# === Utilities ===
+def extract_python_code(response_text):
+    matches = re.findall(r"```(?:python)?(.*?)```", response_text, re.DOTALL)
+    return matches[0].strip() if matches else response_text.strip()
+
+def get_perimeter_function_from_gpt(prompt):
+    response = client.chat.completions.create(
+        model="gpt-4o",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0
+    )
+    return response.choices[0].message.content
+
+def upload_image():
+    uploaded = files.upload()
+    for filename in uploaded.keys():
+        return filename
+
+# === Safe runner with global patches ===
+def run_generated_perimeter_function(code_str, image_array):
+    import cv2
+    import numpy as np
+
+    # Convert boolean to uint8 (0 or 255) so OpenCV can handle it
+    if image_array.dtype == bool:
+        image_array = (~image_array).astype(np.uint8) * 255  # fluid = 0, background = 255
+    elif image_array.dtype != np.uint8:
+        image_array = image_array.astype(np.uint8)
+
+    code_str = extract_python_code(code_str)
+
+    # Inject known helpers
+    global_vars = {}
+    exec(subtract_inlet_definition, global_vars)
+    exec(subtract_outlet_definition, global_vars)
+
+    # Patch OpenCV and numpy imports if needed
+    if "cv2" in code_str and "import cv2" not in code_str:
+        code_str = "import cv2\n" + code_str
+    if "np." in code_str and "import numpy as np" not in code_str:
+        code_str = "import numpy as np\n" + code_str
+
+    # Execute the function code and call it
+    exec(code_str, global_vars)
+    perimeter_fn = global_vars.get("perimeter")
+    if perimeter_fn is None:
+        raise ValueError("Function `perimeter()` not found in generated code.")
+    return perimeter_fn(image_array)
+
+
+# === MAIN LOOP ===
+attempts = 0
+mae_list = []
+all_errors = []
+
+while attempts < 10:
+    print(f"\n📤 Upload a PNG image for attempt {attempts + 1}")
+    image_path = upload_image()
+
+    image = Image.open(image_path).convert('L')
+    image_array = np.array(image) > 128  # binary format for input
+
+    actual_value = perimeter_actual(image_path)
+
+    prompt = base_prompt if attempts == 0 else base_prompt + f"\n\nFeedback: Your last estimate had MAE = {mae_list[-1]:.4f}. Please refine the function."
+
+    print("🔁 Calling ChatGPT for perimeter() function...")
+    code = get_perimeter_function_from_gpt(prompt)
+    print("🧠 Function received from GPT:\n", code)
+
+    try:
+        pred_value = run_generated_perimeter_function(code, image_array)
+    except Exception as e:
+        print("❌ Error running the generated function:", e)
+        mae_list.append(100)  # Penalize failure
+        attempts += 1
+        continue
+
+    error = abs(pred_value - actual_value)
+    all_errors.append(error)
+    mae = error if attempts == 0 else np.mean(all_errors)
+    mae_list.append(mae)
+
+    print(f"\n✅ Attempt {attempts + 1}:")
+    print(f"Predicted Perimeter: {pred_value:.2f}")
+    print(f"Actual Perimeter:    {actual_value:.2f}")
+    print(f"Absolute Error:      {error:.2f}")
+    print(f"MAE:                 {mae:.4f}")
+
+    if mae < 100:
+        print("\n🎯 Success! Final GPT-generated `perimeter()` function:\n")
+        print(extract_python_code(code))
+        break
+    else:
+        print("\n⚠️ Not accurate enough. Please upload another image to improve it.\n")
+
+    attempts += 1
+
+# === PLOT MAE ===
+plt.plot(range(1, len(mae_list)+1), mae_list, marker='o')
+plt.title("Mean Absolute Error (MAE) for perimeter()")
+plt.xlabel("Attempt")
+plt.ylabel("MAE")
+plt.grid(True)
+plt.show()
+```
+
+::: {.output .stream .stdout}
+
+    📤 Upload a PNG image for attempt 1
+:::
+
+::: {.output .error ename="NameError" evalue="name 'files' is not defined"}
+    ---------------------------------------------------------------------------
+    NameError                                 Traceback (most recent call last)
+    /tmp/ipython-input-4-4130516232.py in <cell line: 0>()
+        170 while attempts < 10:
+        171     print(f"\n📤 Upload a PNG image for attempt {attempts + 1}")
+    --> 172     image_path = upload_image()
+        173 
+        174     image = Image.open(image_path).convert('L')
+
+    /tmp/ipython-input-4-4130516232.py in upload_image()
+        127 
+        128 def upload_image():
+    --> 129     uploaded = files.upload()
+        130     for filename in uploaded.keys():
+        131         return filename
+
+    NameError: name 'files' is not defined
+:::
+:::
+
+::: {#ED3LeTK9fjG5 .cell .markdown id="ED3LeTK9fjG5"}
+##Test connectivity Failed for design_80 (❌ Error running the generated
+function: Failed to execute generated code: name \'count_segments\' is
+not defined), but works for design_167 (0 MAE)
+:::
+
+::: {#6VR29XnLfmqa .cell .code colab="{\"background_save\":true,\"base_uri\":\"https://localhost:8080/\",\"height\":1000}" id="6VR29XnLfmqa" outputId="367da81f-43bf-4b86-d216-14c677cf4a6e"}
+``` python
+base_prompt = """Write a Python function called `connectivity()` that takes a 2D binary or grayscale numpy array as input and returns an integer count of how many times fluid channels diverge or converge.
+
+- Fluid channels are black (pixel = 0).
+- In each vertical column, you can detect how many separate vertical fluid segments exist.
+- Count an event each time the number of segments changes between two consecutive columns (i.e., merge or split occurs).
+- The function should return the total number of such change events across the width of the array."""
+
+# === Hidden Ground Truth Function ===
+def connectivity_actual(image_path):
+    image = Image.open(image_path)
+    grayscale_image = image.convert('L')
+    array = np.array(grayscale_image) > 128
+
+    change_count = 0
+    for col_index in range(array.shape[1] - 1):
+        prev = int(np.round(np.sum(array[:-1, col_index] != array[1:, col_index]) / 2))
+        curr = int(np.round(np.sum(array[:-1, col_index + 1] != array[1:, col_index + 1]) / 2))
+        if prev != curr:
+            change_count += 1
+    return change_count
+
+# === Utilities ===
+def extract_python_code(response_text):
+    matches = re.findall(r"```(?:python)?(.*?)```", response_text, re.DOTALL)
+    return matches[0].strip() if matches else response_text.strip()
+
+def get_connectivity_function_from_gpt(prompt):
+    response = client.chat.completions.create(
+        model="gpt-4o",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0
+    )
+    return response.choices[0].message.content
+
+def upload_image():
+    uploaded = files.upload()
+    for filename in uploaded.keys():
+        return filename
+
+def run_generated_connectivity_function(code_str, image_array):
+    import numpy as np
+
+    # Ensure binary format (black = 0, white = 1)
+    if image_array.dtype == bool:
+        image_array = (~image_array).astype(np.uint8)
+    elif image_array.dtype != np.uint8:
+        image_array = (image_array < 128).astype(np.uint8)
+
+    code_str = extract_python_code(code_str)
+
+    # Fallback helper: count_segments
+    fallback_count_segments = """
+def count_segments(column):
+    return int(np.round(np.sum(column[:-1] != column[1:]) / 2))
+"""
+
+    # Inject fallback if GPT uses but doesn’t define it
+    if "count_segments(" in code_str and "def count_segments" not in code_str:
+        code_str = fallback_count_segments + "\n" + code_str
+
+    local_vars = {}
+    try:
+        exec(code_str, globals(), local_vars)
+        connectivity_fn = local_vars.get("connectivity")
+        if connectivity_fn is None:
+            raise ValueError("Function `connectivity()` not found.")
+        return connectivity_fn(image_array)
+    except Exception as e:
+        raise RuntimeError(f"Failed to execute generated code: {e}")
+
+
+# === MAIN LOOP ===
+attempts = 0
+mae_list = []
+all_errors = []
+
+while attempts < 10:
+    print(f"\n📤 Upload a PNG image for attempt {attempts + 1}")
+    image_path = upload_image()
+
+    image = Image.open(image_path).convert('L')
+    image_array = np.array(image)
+
+    actual_value = connectivity_actual(image_path)
+
+    prompt = base_prompt if attempts == 0 else base_prompt + f"\n\nFeedback: Your previous attempt had MAE = {mae_list[-1]:.4f}. Please refine the function."
+
+    print("🔁 Calling ChatGPT for connectivity() function...")
+    code = get_connectivity_function_from_gpt(prompt)
+    print("🧠 Function received from GPT:\n", code)
+
+    try:
+        pred_value = run_generated_connectivity_function(code, image_array)
+    except Exception as e:
+        print("❌ Error running the generated function:", e)
+        mae_list.append(100)
+        attempts += 1
+        continue
+
+    error = abs(pred_value - actual_value)
+    all_errors.append(error)
+    mae = error if attempts == 0 else np.mean(all_errors)
+    mae_list.append(mae)
+
+    print(f"\n✅ Attempt {attempts + 1}:")
+    print(f"Predicted Connectivity: {pred_value}")
+    print(f"Actual Connectivity:    {actual_value}")
+    print(f"Absolute Error:         {error}")
+    print(f"MAE:                    {mae:.4f}")
+
+    if mae < 0.1:
+        print("\n🎯 Success: MAE is acceptable. Final GPT-generated `connectivity()` function:\n")
+        print(extract_python_code(code))
+        break
+    else:
+        print("\n⚠️ Not accurate enough. Please upload another image to improve.\n")
+
+    attempts += 1
+
+# === PLOT MAE ===
+plt.plot(range(1, len(mae_list)+1), mae_list, marker='o')
+plt.title("Mean Absolute Error (MAE) for connectivity()")
+plt.xlabel("Attempt")
+plt.ylabel("MAE")
+plt.grid(True)
+plt.show()
+```
+
+::: {.output .stream .stdout}
+
+    📤 Upload a PNG image for attempt 1
+:::
+
+::: {.output .display_data}
+```{=html}
+
+     <input type="file" id="files-bd68d0d2-d138-4f21-8c0c-9fd43dd097e2" name="files[]" multiple disabled
+        style="border:none" />
+     <output id="result-bd68d0d2-d138-4f21-8c0c-9fd43dd097e2">
+      Upload widget is only available when the cell has been executed in the
+      current browser session. Please rerun this cell to enable.
+      </output>
+      <script>// Copyright 2017 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+/**
+ * @fileoverview Helpers for google.colab Python module.
+ */
+(function(scope) {
+function span(text, styleAttributes = {}) {
+  const element = document.createElement('span');
+  element.textContent = text;
+  for (const key of Object.keys(styleAttributes)) {
+    element.style[key] = styleAttributes[key];
+  }
+  return element;
+}
+
+// Max number of bytes which will be uploaded at a time.
+const MAX_PAYLOAD_SIZE = 100 * 1024;
+
+function _uploadFiles(inputId, outputId) {
+  const steps = uploadFilesStep(inputId, outputId);
+  const outputElement = document.getElementById(outputId);
+  // Cache steps on the outputElement to make it available for the next call
+  // to uploadFilesContinue from Python.
+  outputElement.steps = steps;
+
+  return _uploadFilesContinue(outputId);
+}
+
+// This is roughly an async generator (not supported in the browser yet),
+// where there are multiple asynchronous steps and the Python side is going
+// to poll for completion of each step.
+// This uses a Promise to block the python side on completion of each step,
+// then passes the result of the previous step as the input to the next step.
+function _uploadFilesContinue(outputId) {
+  const outputElement = document.getElementById(outputId);
+  const steps = outputElement.steps;
+
+  const next = steps.next(outputElement.lastPromiseValue);
+  return Promise.resolve(next.value.promise).then((value) => {
+    // Cache the last promise value to make it available to the next
+    // step of the generator.
+    outputElement.lastPromiseValue = value;
+    return next.value.response;
+  });
+}
+
+/**
+ * Generator function which is called between each async step of the upload
+ * process.
+ * @param {string} inputId Element ID of the input file picker element.
+ * @param {string} outputId Element ID of the output display.
+ * @return {!Iterable<!Object>} Iterable of next steps.
+ */
+function* uploadFilesStep(inputId, outputId) {
+  const inputElement = document.getElementById(inputId);
+  inputElement.disabled = false;
+
+  const outputElement = document.getElementById(outputId);
+  outputElement.innerHTML = '';
+
+  const pickedPromise = new Promise((resolve) => {
+    inputElement.addEventListener('change', (e) => {
+      resolve(e.target.files);
+    });
+  });
+
+  const cancel = document.createElement('button');
+  inputElement.parentElement.appendChild(cancel);
+  cancel.textContent = 'Cancel upload';
+  const cancelPromise = new Promise((resolve) => {
+    cancel.onclick = () => {
+      resolve(null);
+    };
+  });
+
+  // Wait for the user to pick the files.
+  const files = yield {
+    promise: Promise.race([pickedPromise, cancelPromise]),
+    response: {
+      action: 'starting',
+    }
+  };
+
+  cancel.remove();
+
+  // Disable the input element since further picks are not allowed.
+  inputElement.disabled = true;
+
+  if (!files) {
+    return {
+      response: {
+        action: 'complete',
+      }
+    };
+  }
+
+  for (const file of files) {
+    const li = document.createElement('li');
+    li.append(span(file.name, {fontWeight: 'bold'}));
+    li.append(span(
+        `(${file.type || 'n/a'}) - ${file.size} bytes, ` +
+        `last modified: ${
+            file.lastModifiedDate ? file.lastModifiedDate.toLocaleDateString() :
+                                    'n/a'} - `));
+    const percent = span('0% done');
+    li.appendChild(percent);
+
+    outputElement.appendChild(li);
+
+    const fileDataPromise = new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        resolve(e.target.result);
+      };
+      reader.readAsArrayBuffer(file);
+    });
+    // Wait for the data to be ready.
+    let fileData = yield {
+      promise: fileDataPromise,
+      response: {
+        action: 'continue',
+      }
+    };
+
+    // Use a chunked sending to avoid message size limits. See b/62115660.
+    let position = 0;
+    do {
+      const length = Math.min(fileData.byteLength - position, MAX_PAYLOAD_SIZE);
+      const chunk = new Uint8Array(fileData, position, length);
+      position += length;
+
+      const base64 = btoa(String.fromCharCode.apply(null, chunk));
+      yield {
+        response: {
+          action: 'append',
+          file: file.name,
+          data: base64,
+        },
+      };
+
+      let percentDone = fileData.byteLength === 0 ?
+          100 :
+          Math.round((position / fileData.byteLength) * 100);
+      percent.textContent = `${percentDone}% done`;
+
+    } while (position < fileData.byteLength);
+  }
+
+  // All done.
+  yield {
+    response: {
+      action: 'complete',
+    }
+  };
+}
+
+scope.google = scope.google || {};
+scope.google.colab = scope.google.colab || {};
+scope.google.colab._files = {
+  _uploadFiles,
+  _uploadFilesContinue,
+};
+})(self);
+</script> 
+```
+:::
+
+::: {.output .stream .stdout}
+    Saving design_80.png to design_80 (1).png
+    🔁 Calling ChatGPT for connectivity() function...
+    🧠 Function received from GPT:
+     To solve this problem, we need to analyze the connectivity of fluid channels in a 2D binary or grayscale numpy array. The goal is to count the number of times fluid channels diverge or converge as we move from one column to the next. Here's how you can implement the `connectivity()` function:
+
+    ```python
+    import numpy as np
+    from scipy.ndimage import label
+
+    def count_segments(column):
+        """Helper function to count the number of separate fluid segments in a column."""
+        # Consider fluid channels as 0, so we invert the column to find connected components
+        inverted_column = 1 - column
+        # Label connected components
+        labeled_array, num_features = label(inverted_column)
+        return num_features
+
+    def connectivity(array):
+        # Ensure the input is a numpy array
+        array = np.asarray(array)
+        
+        # Get the number of columns
+        num_columns = array.shape[1]
+        
+        # Initialize the previous segment count
+        prev_segment_count = count_segments(array[:, 0])
+        
+        # Initialize the event count
+        event_count = 0
+        
+        # Iterate over each column starting from the second one
+        for col in range(1, num_columns):
+            # Count the number of segments in the current column
+            current_segment_count = count_segments(array[:, col])
+            
+            # If the number of segments changes, increment the event count
+            if current_segment_count != prev_segment_count:
+                event_count += 1
+            
+            # Update the previous segment count
+            prev_segment_count = current_segment_count
+        
+        return event_count
+
+    # Example usage:
+    # array = np.array([[1, 0, 0, 1],
+    #                   [0, 0, 1, 1],
+    #                   [1, 1, 0, 0],
+    #                   [0, 0, 0, 1]])
+    # print(connectivity(array))  # Output will depend on the specific array structure
+    ```
+
+    ### Explanation:
+
+    1. **Inversion and Labeling**: Since fluid channels are represented by 0s, we invert the column (using `1 - column`) to treat fluid channels as 1s for the purpose of labeling connected components. This allows us to use `scipy.ndimage.label` to count the number of connected components (fluid segments) in each column.
+
+    2. **Counting Segments**: The `count_segments` function counts the number of separate fluid segments in a given column by labeling connected components.
+
+    3. **Iterating Through Columns**: We iterate through each column of the array, starting from the second column. For each column, we count the number of fluid segments and compare it to the previous column's segment count.
+
+    4. **Counting Events**: Each time the number of segments changes between consecutive columns, we increment the `event_count`.
+
+    5. **Return the Total Count**: Finally, the function returns the total number of divergence or convergence events detected across the width of the array.
+    ❌ Error running the generated function: Failed to execute generated code: name 'count_segments' is not defined
+
+    📤 Upload a PNG image for attempt 2
+:::
+
+::: {.output .display_data}
+```{=html}
+
+     <input type="file" id="files-736a7113-8827-42b7-97ec-0fe57d5ce20e" name="files[]" multiple disabled
+        style="border:none" />
+     <output id="result-736a7113-8827-42b7-97ec-0fe57d5ce20e">
+      Upload widget is only available when the cell has been executed in the
+      current browser session. Please rerun this cell to enable.
+      </output>
+      <script>// Copyright 2017 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+/**
+ * @fileoverview Helpers for google.colab Python module.
+ */
+(function(scope) {
+function span(text, styleAttributes = {}) {
+  const element = document.createElement('span');
+  element.textContent = text;
+  for (const key of Object.keys(styleAttributes)) {
+    element.style[key] = styleAttributes[key];
+  }
+  return element;
+}
+
+// Max number of bytes which will be uploaded at a time.
+const MAX_PAYLOAD_SIZE = 100 * 1024;
+
+function _uploadFiles(inputId, outputId) {
+  const steps = uploadFilesStep(inputId, outputId);
+  const outputElement = document.getElementById(outputId);
+  // Cache steps on the outputElement to make it available for the next call
+  // to uploadFilesContinue from Python.
+  outputElement.steps = steps;
+
+  return _uploadFilesContinue(outputId);
+}
+
+// This is roughly an async generator (not supported in the browser yet),
+// where there are multiple asynchronous steps and the Python side is going
+// to poll for completion of each step.
+// This uses a Promise to block the python side on completion of each step,
+// then passes the result of the previous step as the input to the next step.
+function _uploadFilesContinue(outputId) {
+  const outputElement = document.getElementById(outputId);
+  const steps = outputElement.steps;
+
+  const next = steps.next(outputElement.lastPromiseValue);
+  return Promise.resolve(next.value.promise).then((value) => {
+    // Cache the last promise value to make it available to the next
+    // step of the generator.
+    outputElement.lastPromiseValue = value;
+    return next.value.response;
+  });
+}
+
+/**
+ * Generator function which is called between each async step of the upload
+ * process.
+ * @param {string} inputId Element ID of the input file picker element.
+ * @param {string} outputId Element ID of the output display.
+ * @return {!Iterable<!Object>} Iterable of next steps.
+ */
+function* uploadFilesStep(inputId, outputId) {
+  const inputElement = document.getElementById(inputId);
+  inputElement.disabled = false;
+
+  const outputElement = document.getElementById(outputId);
+  outputElement.innerHTML = '';
+
+  const pickedPromise = new Promise((resolve) => {
+    inputElement.addEventListener('change', (e) => {
+      resolve(e.target.files);
+    });
+  });
+
+  const cancel = document.createElement('button');
+  inputElement.parentElement.appendChild(cancel);
+  cancel.textContent = 'Cancel upload';
+  const cancelPromise = new Promise((resolve) => {
+    cancel.onclick = () => {
+      resolve(null);
+    };
+  });
+
+  // Wait for the user to pick the files.
+  const files = yield {
+    promise: Promise.race([pickedPromise, cancelPromise]),
+    response: {
+      action: 'starting',
+    }
+  };
+
+  cancel.remove();
+
+  // Disable the input element since further picks are not allowed.
+  inputElement.disabled = true;
+
+  if (!files) {
+    return {
+      response: {
+        action: 'complete',
+      }
+    };
+  }
+
+  for (const file of files) {
+    const li = document.createElement('li');
+    li.append(span(file.name, {fontWeight: 'bold'}));
+    li.append(span(
+        `(${file.type || 'n/a'}) - ${file.size} bytes, ` +
+        `last modified: ${
+            file.lastModifiedDate ? file.lastModifiedDate.toLocaleDateString() :
+                                    'n/a'} - `));
+    const percent = span('0% done');
+    li.appendChild(percent);
+
+    outputElement.appendChild(li);
+
+    const fileDataPromise = new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        resolve(e.target.result);
+      };
+      reader.readAsArrayBuffer(file);
+    });
+    // Wait for the data to be ready.
+    let fileData = yield {
+      promise: fileDataPromise,
+      response: {
+        action: 'continue',
+      }
+    };
+
+    // Use a chunked sending to avoid message size limits. See b/62115660.
+    let position = 0;
+    do {
+      const length = Math.min(fileData.byteLength - position, MAX_PAYLOAD_SIZE);
+      const chunk = new Uint8Array(fileData, position, length);
+      position += length;
+
+      const base64 = btoa(String.fromCharCode.apply(null, chunk));
+      yield {
+        response: {
+          action: 'append',
+          file: file.name,
+          data: base64,
+        },
+      };
+
+      let percentDone = fileData.byteLength === 0 ?
+          100 :
+          Math.round((position / fileData.byteLength) * 100);
+      percent.textContent = `${percentDone}% done`;
+
+    } while (position < fileData.byteLength);
+  }
+
+  // All done.
+  yield {
+    response: {
+      action: 'complete',
+    }
+  };
+}
+
+scope.google = scope.google || {};
+scope.google.colab = scope.google.colab || {};
+scope.google.colab._files = {
+  _uploadFiles,
+  _uploadFilesContinue,
+};
+})(self);
+</script> 
+```
+:::
+
+::: {.output .stream .stdout}
+    Saving design_167.png to design_167.png
+    🔁 Calling ChatGPT for connectivity() function...
+    🧠 Function received from GPT:
+     To solve this problem, we need to analyze the 2D array column by column and detect changes in the number of separate vertical fluid segments (black pixel segments) between consecutive columns. Each time the number of segments changes, it indicates a divergence or convergence event.
+
+    Here's a step-by-step approach to implement the `connectivity()` function:
+
+    1. **Identify Segments in a Column**: For each column, identify contiguous segments of black pixels (value 0). This can be done by iterating through the column and counting transitions from non-black to black pixels.
+
+    2. **Compare Consecutive Columns**: For each pair of consecutive columns, compare the number of segments. If the number of segments changes, it indicates a divergence or convergence event.
+
+    3. **Count Events**: Keep a count of how many times these changes occur as you move from the first to the last column.
+
+    Here's the implementation of the `connectivity()` function:
+
+    ```python
+    import numpy as np
+
+    def count_segments(column):
+        """Count the number of contiguous black pixel segments in a column."""
+        segments = 0
+        in_segment = False
+        for pixel in column:
+            if pixel == 0 and not in_segment:
+                # Start of a new segment
+                segments += 1
+                in_segment = True
+            elif pixel != 0:
+                # End of a segment
+                in_segment = False
+        return segments
+
+    def connectivity(array):
+        """Count the number of divergence or convergence events in the array."""
+        if array.ndim != 2:
+            raise ValueError("Input must be a 2D array.")
+        
+        num_rows, num_cols = array.shape
+        if num_cols < 2:
+            return 0  # No events possible with less than 2 columns
+        
+        # Initialize the count of events
+        event_count = 0
+        
+        # Count segments in the first column
+        previous_segments = count_segments(array[:, 0])
+        
+        # Iterate over each column starting from the second
+        for col in range(1, num_cols):
+            current_segments = count_segments(array[:, col])
+            
+            # Check if the number of segments has changed
+            if current_segments != previous_segments:
+                event_count += 1
+            
+            # Update previous_segments for the next iteration
+            previous_segments = current_segments
+        
+        return event_count
+
+    # Example usage:
+    # array = np.array([[0, 0, 1, 0],
+    #                   [0, 1, 1, 0],
+    #                   [1, 1, 0, 0],
+    #                   [0, 0, 0, 1]])
+    # print(connectivity(array))  # Output: 3
+    ```
+
+    ### Explanation:
+    - **count_segments**: This helper function counts the number of contiguous segments of black pixels in a given column.
+    - **connectivity**: This function iterates over each column, uses `count_segments` to determine the number of segments, and compares it with the previous column's segment count to detect changes.
+    - **Event Counting**: Each change in the number of segments between consecutive columns is counted as an event.
+
+    This approach ensures that we accurately count the number of divergence or convergence events in the fluid channels represented by the 2D array.
+    ❌ Error running the generated function: Failed to execute generated code: name 'count_segments' is not defined
+
+    📤 Upload a PNG image for attempt 3
+:::
+
+::: {.output .display_data}
+```{=html}
+
+     <input type="file" id="files-50cdaccf-d266-45cc-a7b9-d3ace02783fe" name="files[]" multiple disabled
+        style="border:none" />
+     <output id="result-50cdaccf-d266-45cc-a7b9-d3ace02783fe">
+      Upload widget is only available when the cell has been executed in the
+      current browser session. Please rerun this cell to enable.
+      </output>
+      <script>// Copyright 2017 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+/**
+ * @fileoverview Helpers for google.colab Python module.
+ */
+(function(scope) {
+function span(text, styleAttributes = {}) {
+  const element = document.createElement('span');
+  element.textContent = text;
+  for (const key of Object.keys(styleAttributes)) {
+    element.style[key] = styleAttributes[key];
+  }
+  return element;
+}
+
+// Max number of bytes which will be uploaded at a time.
+const MAX_PAYLOAD_SIZE = 100 * 1024;
+
+function _uploadFiles(inputId, outputId) {
+  const steps = uploadFilesStep(inputId, outputId);
+  const outputElement = document.getElementById(outputId);
+  // Cache steps on the outputElement to make it available for the next call
+  // to uploadFilesContinue from Python.
+  outputElement.steps = steps;
+
+  return _uploadFilesContinue(outputId);
+}
+
+// This is roughly an async generator (not supported in the browser yet),
+// where there are multiple asynchronous steps and the Python side is going
+// to poll for completion of each step.
+// This uses a Promise to block the python side on completion of each step,
+// then passes the result of the previous step as the input to the next step.
+function _uploadFilesContinue(outputId) {
+  const outputElement = document.getElementById(outputId);
+  const steps = outputElement.steps;
+
+  const next = steps.next(outputElement.lastPromiseValue);
+  return Promise.resolve(next.value.promise).then((value) => {
+    // Cache the last promise value to make it available to the next
+    // step of the generator.
+    outputElement.lastPromiseValue = value;
+    return next.value.response;
+  });
+}
+
+/**
+ * Generator function which is called between each async step of the upload
+ * process.
+ * @param {string} inputId Element ID of the input file picker element.
+ * @param {string} outputId Element ID of the output display.
+ * @return {!Iterable<!Object>} Iterable of next steps.
+ */
+function* uploadFilesStep(inputId, outputId) {
+  const inputElement = document.getElementById(inputId);
+  inputElement.disabled = false;
+
+  const outputElement = document.getElementById(outputId);
+  outputElement.innerHTML = '';
+
+  const pickedPromise = new Promise((resolve) => {
+    inputElement.addEventListener('change', (e) => {
+      resolve(e.target.files);
+    });
+  });
+
+  const cancel = document.createElement('button');
+  inputElement.parentElement.appendChild(cancel);
+  cancel.textContent = 'Cancel upload';
+  const cancelPromise = new Promise((resolve) => {
+    cancel.onclick = () => {
+      resolve(null);
+    };
+  });
+
+  // Wait for the user to pick the files.
+  const files = yield {
+    promise: Promise.race([pickedPromise, cancelPromise]),
+    response: {
+      action: 'starting',
+    }
+  };
+
+  cancel.remove();
+
+  // Disable the input element since further picks are not allowed.
+  inputElement.disabled = true;
+
+  if (!files) {
+    return {
+      response: {
+        action: 'complete',
+      }
+    };
+  }
+
+  for (const file of files) {
+    const li = document.createElement('li');
+    li.append(span(file.name, {fontWeight: 'bold'}));
+    li.append(span(
+        `(${file.type || 'n/a'}) - ${file.size} bytes, ` +
+        `last modified: ${
+            file.lastModifiedDate ? file.lastModifiedDate.toLocaleDateString() :
+                                    'n/a'} - `));
+    const percent = span('0% done');
+    li.appendChild(percent);
+
+    outputElement.appendChild(li);
+
+    const fileDataPromise = new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        resolve(e.target.result);
+      };
+      reader.readAsArrayBuffer(file);
+    });
+    // Wait for the data to be ready.
+    let fileData = yield {
+      promise: fileDataPromise,
+      response: {
+        action: 'continue',
+      }
+    };
+
+    // Use a chunked sending to avoid message size limits. See b/62115660.
+    let position = 0;
+    do {
+      const length = Math.min(fileData.byteLength - position, MAX_PAYLOAD_SIZE);
+      const chunk = new Uint8Array(fileData, position, length);
+      position += length;
+
+      const base64 = btoa(String.fromCharCode.apply(null, chunk));
+      yield {
+        response: {
+          action: 'append',
+          file: file.name,
+          data: base64,
+        },
+      };
+
+      let percentDone = fileData.byteLength === 0 ?
+          100 :
+          Math.round((position / fileData.byteLength) * 100);
+      percent.textContent = `${percentDone}% done`;
+
+    } while (position < fileData.byteLength);
+  }
+
+  // All done.
+  yield {
+    response: {
+      action: 'complete',
+    }
+  };
+}
+
+scope.google = scope.google || {};
+scope.google.colab = scope.google.colab || {};
+scope.google.colab._files = {
+  _uploadFiles,
+  _uploadFilesContinue,
+};
+})(self);
+</script> 
+```
+:::
+
+::: {.output .stream .stdout}
+    Saving design_161.png to design_161.png
+    🔁 Calling ChatGPT for connectivity() function...
+    🧠 Function received from GPT:
+     To solve this problem, we need to analyze the 2D numpy array column by column to detect changes in the number of separate vertical fluid segments. A fluid segment is defined as a contiguous vertical sequence of black pixels (value 0). We will count the number of segments in each column and then compare consecutive columns to detect changes in the number of segments, which indicate either a merge or a split.
+
+    Here's a step-by-step approach to implement the `connectivity()` function:
+
+    1. Iterate through each column of the array.
+    2. For each column, count the number of separate fluid segments.
+    3. Compare the number of segments in the current column with the previous column.
+    4. If the number of segments changes, increment the event count.
+    5. Return the total number of change events.
+
+    Here's the implementation:
+
+    ```python
+    import numpy as np
+
+    def count_segments(column):
+        """Helper function to count the number of separate fluid segments in a column."""
+        # Find where the column has black pixels (value 0)
+        black_pixels = (column == 0)
+        # Count transitions from False to True in the black_pixels array
+        # This indicates the start of a new segment
+        segments = 0
+        in_segment = False
+        for pixel in black_pixels:
+            if pixel and not in_segment:
+                segments += 1
+                in_segment = True
+            elif not pixel:
+                in_segment = False
+        return segments
+
+    def connectivity(array):
+        # Ensure the input is a numpy array
+        array = np.array(array)
+        
+        # Initialize the number of change events
+        change_events = 0
+        
+        # Get the number of columns
+        num_columns = array.shape[1]
+        
+        # Initialize the previous segment count
+        previous_segments = count_segments(array[:, 0])
+        
+        # Iterate over each column starting from the second one
+        for col in range(1, num_columns):
+            current_segments = count_segments(array[:, col])
+            
+            # Check if the number of segments has changed
+            if current_segments != previous_segments:
+                change_events += 1
+            
+            # Update the previous segment count
+            previous_segments = current_segments
+        
+        return change_events
+
+    # Example usage:
+    # array = np.array([[1, 0, 0, 1],
+    #                   [0, 0, 1, 1],
+    #                   [1, 1, 0, 0],
+    #                   [0, 0, 0, 1]])
+    # print(connectivity(array))  # Output will depend on the specific array structure
+    ```
+
+    ### Explanation:
+    - **`count_segments(column)`**: This helper function counts the number of separate fluid segments in a given column by detecting transitions from non-black to black pixels.
+    - **`connectivity(array)`**: This function iterates through each column, uses `count_segments` to determine the number of segments, and compares it with the previous column to detect changes. Each change is counted as an event.
+
+    This approach ensures that we accurately count the number of times fluid channels diverge or converge across the array.
+    ❌ Error running the generated function: Failed to execute generated code: name 'count_segments' is not defined
+
+    📤 Upload a PNG image for attempt 4
+:::
+
+::: {.output .display_data}
+```{=html}
+
+     <input type="file" id="files-55275fc6-b453-42ce-9b35-fefdd29c314e" name="files[]" multiple disabled
+        style="border:none" />
+     <output id="result-55275fc6-b453-42ce-9b35-fefdd29c314e">
+      Upload widget is only available when the cell has been executed in the
+      current browser session. Please rerun this cell to enable.
+      </output>
+      <script>// Copyright 2017 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+/**
+ * @fileoverview Helpers for google.colab Python module.
+ */
+(function(scope) {
+function span(text, styleAttributes = {}) {
+  const element = document.createElement('span');
+  element.textContent = text;
+  for (const key of Object.keys(styleAttributes)) {
+    element.style[key] = styleAttributes[key];
+  }
+  return element;
+}
+
+// Max number of bytes which will be uploaded at a time.
+const MAX_PAYLOAD_SIZE = 100 * 1024;
+
+function _uploadFiles(inputId, outputId) {
+  const steps = uploadFilesStep(inputId, outputId);
+  const outputElement = document.getElementById(outputId);
+  // Cache steps on the outputElement to make it available for the next call
+  // to uploadFilesContinue from Python.
+  outputElement.steps = steps;
+
+  return _uploadFilesContinue(outputId);
+}
+
+// This is roughly an async generator (not supported in the browser yet),
+// where there are multiple asynchronous steps and the Python side is going
+// to poll for completion of each step.
+// This uses a Promise to block the python side on completion of each step,
+// then passes the result of the previous step as the input to the next step.
+function _uploadFilesContinue(outputId) {
+  const outputElement = document.getElementById(outputId);
+  const steps = outputElement.steps;
+
+  const next = steps.next(outputElement.lastPromiseValue);
+  return Promise.resolve(next.value.promise).then((value) => {
+    // Cache the last promise value to make it available to the next
+    // step of the generator.
+    outputElement.lastPromiseValue = value;
+    return next.value.response;
+  });
+}
+
+/**
+ * Generator function which is called between each async step of the upload
+ * process.
+ * @param {string} inputId Element ID of the input file picker element.
+ * @param {string} outputId Element ID of the output display.
+ * @return {!Iterable<!Object>} Iterable of next steps.
+ */
+function* uploadFilesStep(inputId, outputId) {
+  const inputElement = document.getElementById(inputId);
+  inputElement.disabled = false;
+
+  const outputElement = document.getElementById(outputId);
+  outputElement.innerHTML = '';
+
+  const pickedPromise = new Promise((resolve) => {
+    inputElement.addEventListener('change', (e) => {
+      resolve(e.target.files);
+    });
+  });
+
+  const cancel = document.createElement('button');
+  inputElement.parentElement.appendChild(cancel);
+  cancel.textContent = 'Cancel upload';
+  const cancelPromise = new Promise((resolve) => {
+    cancel.onclick = () => {
+      resolve(null);
+    };
+  });
+
+  // Wait for the user to pick the files.
+  const files = yield {
+    promise: Promise.race([pickedPromise, cancelPromise]),
+    response: {
+      action: 'starting',
+    }
+  };
+
+  cancel.remove();
+
+  // Disable the input element since further picks are not allowed.
+  inputElement.disabled = true;
+
+  if (!files) {
+    return {
+      response: {
+        action: 'complete',
+      }
+    };
+  }
+
+  for (const file of files) {
+    const li = document.createElement('li');
+    li.append(span(file.name, {fontWeight: 'bold'}));
+    li.append(span(
+        `(${file.type || 'n/a'}) - ${file.size} bytes, ` +
+        `last modified: ${
+            file.lastModifiedDate ? file.lastModifiedDate.toLocaleDateString() :
+                                    'n/a'} - `));
+    const percent = span('0% done');
+    li.appendChild(percent);
+
+    outputElement.appendChild(li);
+
+    const fileDataPromise = new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        resolve(e.target.result);
+      };
+      reader.readAsArrayBuffer(file);
+    });
+    // Wait for the data to be ready.
+    let fileData = yield {
+      promise: fileDataPromise,
+      response: {
+        action: 'continue',
+      }
+    };
+
+    // Use a chunked sending to avoid message size limits. See b/62115660.
+    let position = 0;
+    do {
+      const length = Math.min(fileData.byteLength - position, MAX_PAYLOAD_SIZE);
+      const chunk = new Uint8Array(fileData, position, length);
+      position += length;
+
+      const base64 = btoa(String.fromCharCode.apply(null, chunk));
+      yield {
+        response: {
+          action: 'append',
+          file: file.name,
+          data: base64,
+        },
+      };
+
+      let percentDone = fileData.byteLength === 0 ?
+          100 :
+          Math.round((position / fileData.byteLength) * 100);
+      percent.textContent = `${percentDone}% done`;
+
+    } while (position < fileData.byteLength);
+  }
+
+  // All done.
+  yield {
+    response: {
+      action: 'complete',
+    }
+  };
+}
+
+scope.google = scope.google || {};
+scope.google.colab = scope.google.colab || {};
+scope.google.colab._files = {
+  _uploadFiles,
+  _uploadFilesContinue,
+};
+})(self);
+</script> 
+```
+:::
+:::
+
+::: {#c8d6a193 .cell .code colab="{\"base_uri\":\"https://localhost:8080/\",\"height\":341}" id="c8d6a193" outputId="12f4b4b6-22a7-4d43-c6ff-75b0fd835ee6"}
+``` python
+# Step 1: Upload the file
+from google.colab import files
+uploaded = files.upload()
+
+# Step 2: Load and display the image using Pillow and matplotlib
+from PIL import Image
+import numpy as np
+import matplotlib.pyplot as plt
+
+# Automatically use the uploaded file name
+image_path = list(uploaded.keys())[0]
+img = Image.open(image_path)
+
+# Optional: convert image to NumPy array
+img_array = np.array(img)
+
+# Display the image
+plt.imshow(img_array)
+plt.axis('off')
+plt.show()
+```
+
+::: {.output .display_data}
+```{=html}
+
+     <input type="file" id="files-de936fa0-432c-43d1-8aa4-a3c252113a4e" name="files[]" multiple disabled
+        style="border:none" />
+     <output id="result-de936fa0-432c-43d1-8aa4-a3c252113a4e">
+      Upload widget is only available when the cell has been executed in the
+      current browser session. Please rerun this cell to enable.
+      </output>
+      <script>// Copyright 2017 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+/**
+ * @fileoverview Helpers for google.colab Python module.
+ */
+(function(scope) {
+function span(text, styleAttributes = {}) {
+  const element = document.createElement('span');
+  element.textContent = text;
+  for (const key of Object.keys(styleAttributes)) {
+    element.style[key] = styleAttributes[key];
+  }
+  return element;
+}
+
+// Max number of bytes which will be uploaded at a time.
+const MAX_PAYLOAD_SIZE = 100 * 1024;
+
+function _uploadFiles(inputId, outputId) {
+  const steps = uploadFilesStep(inputId, outputId);
+  const outputElement = document.getElementById(outputId);
+  // Cache steps on the outputElement to make it available for the next call
+  // to uploadFilesContinue from Python.
+  outputElement.steps = steps;
+
+  return _uploadFilesContinue(outputId);
+}
+
+// This is roughly an async generator (not supported in the browser yet),
+// where there are multiple asynchronous steps and the Python side is going
+// to poll for completion of each step.
+// This uses a Promise to block the python side on completion of each step,
+// then passes the result of the previous step as the input to the next step.
+function _uploadFilesContinue(outputId) {
+  const outputElement = document.getElementById(outputId);
+  const steps = outputElement.steps;
+
+  const next = steps.next(outputElement.lastPromiseValue);
+  return Promise.resolve(next.value.promise).then((value) => {
+    // Cache the last promise value to make it available to the next
+    // step of the generator.
+    outputElement.lastPromiseValue = value;
+    return next.value.response;
+  });
+}
+
+/**
+ * Generator function which is called between each async step of the upload
+ * process.
+ * @param {string} inputId Element ID of the input file picker element.
+ * @param {string} outputId Element ID of the output display.
+ * @return {!Iterable<!Object>} Iterable of next steps.
+ */
+function* uploadFilesStep(inputId, outputId) {
+  const inputElement = document.getElementById(inputId);
+  inputElement.disabled = false;
+
+  const outputElement = document.getElementById(outputId);
+  outputElement.innerHTML = '';
+
+  const pickedPromise = new Promise((resolve) => {
+    inputElement.addEventListener('change', (e) => {
+      resolve(e.target.files);
+    });
+  });
+
+  const cancel = document.createElement('button');
+  inputElement.parentElement.appendChild(cancel);
+  cancel.textContent = 'Cancel upload';
+  const cancelPromise = new Promise((resolve) => {
+    cancel.onclick = () => {
+      resolve(null);
+    };
+  });
+
+  // Wait for the user to pick the files.
+  const files = yield {
+    promise: Promise.race([pickedPromise, cancelPromise]),
+    response: {
+      action: 'starting',
+    }
+  };
+
+  cancel.remove();
+
+  // Disable the input element since further picks are not allowed.
+  inputElement.disabled = true;
+
+  if (!files) {
+    return {
+      response: {
+        action: 'complete',
+      }
+    };
+  }
+
+  for (const file of files) {
+    const li = document.createElement('li');
+    li.append(span(file.name, {fontWeight: 'bold'}));
+    li.append(span(
+        `(${file.type || 'n/a'}) - ${file.size} bytes, ` +
+        `last modified: ${
+            file.lastModifiedDate ? file.lastModifiedDate.toLocaleDateString() :
+                                    'n/a'} - `));
+    const percent = span('0% done');
+    li.appendChild(percent);
+
+    outputElement.appendChild(li);
+
+    const fileDataPromise = new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        resolve(e.target.result);
+      };
+      reader.readAsArrayBuffer(file);
+    });
+    // Wait for the data to be ready.
+    let fileData = yield {
+      promise: fileDataPromise,
+      response: {
+        action: 'continue',
+      }
+    };
+
+    // Use a chunked sending to avoid message size limits. See b/62115660.
+    let position = 0;
+    do {
+      const length = Math.min(fileData.byteLength - position, MAX_PAYLOAD_SIZE);
+      const chunk = new Uint8Array(fileData, position, length);
+      position += length;
+
+      const base64 = btoa(String.fromCharCode.apply(null, chunk));
+      yield {
+        response: {
+          action: 'append',
+          file: file.name,
+          data: base64,
+        },
+      };
+
+      let percentDone = fileData.byteLength === 0 ?
+          100 :
+          Math.round((position / fileData.byteLength) * 100);
+      percent.textContent = `${percentDone}% done`;
+
+    } while (position < fileData.byteLength);
+  }
+
+  // All done.
+  yield {
+    response: {
+      action: 'complete',
+    }
+  };
+}
+
+scope.google = scope.google || {};
+scope.google.colab = scope.google.colab || {};
+scope.google.colab._files = {
+  _uploadFiles,
+  _uploadFilesContinue,
+};
+})(self);
+</script> 
+```
+:::
+
+::: {.output .stream .stdout}
+    Saving design_80.png to design_80.png
+:::
+
+::: {.output .display_data}
+![](vertopal_27a7b2c2d5ee4fc489a589b8808a77a5/0d3545ea985b1f98d419e0d0d8f78a71392d7611.png)
+:::
+:::
+
+::: {#7d46f7f4 .cell .code colab="{\"base_uri\":\"https://localhost:8080/\"}" id="7d46f7f4" outputId="c584b0bf-7f79-4d74-a63c-4b32326b2edd"}
+``` python
+print(find_vof(image_path))
+print(num_outlets_actual(image_path))
+print(outlet_thicknesses_actual(image_path))
+print(inlet_thicknesses_actual(image_path))
+print(perimeter_actual(image_path))
+print(connectivity_actual(image_path))
+```
+
+::: {.output .stream .stdout}
+    0.32230377197265625
+    2
+    0.18359375
+    0.41015625
+    1488.0508583784103
+    3
+:::
+:::
