@@ -23,6 +23,10 @@ This repository documents the various functions on fluidic channels that can be 
 ![design_195](https://github.com/user-attachments/assets/3e613517-f6ee-4ea7-a1aa-fbd3bce8ad51)
 ![design_11](https://github.com/user-attachments/assets/c249f00c-c14a-40ff-bd0d-4a982524ff3d)
 
+## Task
+To connect chatGPT to a scipetd pyton environment where, given a description of the functions above, chatGPT is to generate python code for those functions, which is then tested against the ground truth function (which I have the access to, but which is hidden from chatGPT). n/
+Subsequently, the generated function is tested against the data set of images of fludiic channels. If the generated function achieves a sufficiently low error score against the ground truth function, the generated function would be accepted. Otherwise, chatGPT would be automatically prompted to generate another function again, and will be given feedback each round based on the past round (i.e. it's mean average error (MAE) and how it should improve). 
+
 ## Acknowledgement
 I would like to thank my supervisor, Dr Ooi Chin Chun, ooicc@cfar.a-star.edu.sg, for letting me work on this project.
 
