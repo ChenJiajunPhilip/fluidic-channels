@@ -23,5 +23,6 @@ This repository documents the various functions on fluidic channels that can be 
 ![design_195](https://github.com/user-attachments/assets/3e613517-f6ee-4ea7-a1aa-fbd3bce8ad51)
 ![design_11](https://github.com/user-attachments/assets/c249f00c-c14a-40ff-bd0d-4a982524ff3d)
 
-
+## Acknowledgement
+I would like to thank my supervisor, Dr Ooi Chin Chun, ooicc@cfar.a-star.edu.sg, for letting me work on this project.
 
